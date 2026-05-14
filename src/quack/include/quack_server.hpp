@@ -29,6 +29,9 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
+// Match FlockHttpServer's openssl-enabled cpp-httplib (see header
+// comment in flock_http_server.hpp explaining the namespace migration).
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 namespace duckdb {
@@ -62,8 +65,8 @@ public:
 	//
 	// Note: GET / (the upstream landing page) is NOT registered —
 	// SPEC §4 reserves GET / for the future flock login wrapper that
-	// arrives in PR-3.
-	void Register(duckdb_httplib::Server &server);
+	// arrives in PR-4.
+	void Register(duckdb_httplib_openssl::Server &server);
 
 private:
 	// Top-level message dispatch. Reads the wire-format header,

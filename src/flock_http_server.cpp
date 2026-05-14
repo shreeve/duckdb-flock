@@ -90,13 +90,13 @@ void FlockHttpServer::Bind() {
 		throw InvalidInputException("FlockHttpServer::Bind called in wrong state");
 	}
 
-	server = make_uniq<duckdb_httplib::Server>();
+	server = make_uniq<duckdb_httplib_openssl::Server>();
 
 	// Each keep-alive connection holds a server thread for its lifetime;
 	// we need enough threads to handle all concurrent keep-alive
 	// connections (catalog clients + scan-thread clients) without
 	// deadlock.
-	server->new_task_queue = [] { return new duckdb_httplib::ThreadPool(kHttplibWorkers); };
+	server->new_task_queue = [] { return new duckdb_httplib_openssl::ThreadPool(kHttplibWorkers); };
 	server->set_keep_alive_max_count(kHttplibKeepAliveCount);
 	server->set_keep_alive_timeout(kHttplibKeepAliveTimeoutSec);
 	server->set_tcp_nodelay(true);
@@ -115,7 +115,7 @@ void FlockHttpServer::Bind() {
 	state = State::BOUND;
 }
 
-duckdb_httplib::Server &FlockHttpServer::Server() {
+duckdb_httplib_openssl::Server &FlockHttpServer::Server() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (state != State::BOUND) {
 		throw InvalidInputException("FlockHttpServer::Server() called outside the BOUND state — "

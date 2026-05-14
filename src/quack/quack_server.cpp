@@ -293,19 +293,19 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 	}
 }
 
-void QuackHandlers::Register(duckdb_httplib::Server &http) {
+void QuackHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	auto *self = this;
 
 	// CORS preflight. Public — no auth, no body. Identical to upstream.
 	//
-	// TODO PR-3 (auth-cookie): wildcard origin is incompatible with
+	// TODO PR-4 (auth-cookie): wildcard origin is incompatible with
 	// credentialed requests per the W3C CORS spec, and SPEC §7
 	// explicitly forbids it once cookies are involved. PR-2 keeps
 	// the upstream wildcard for /quack-only compatibility (no cookies
-	// flow through /quack); PR-3 will refactor this when cookie auth
+	// flow through /quack); PR-4 will refactor this when cookie auth
 	// arrives, replacing `*` with the configured `flock_cors_origins`
 	// allow-list.
-	http.Options("/quack", [](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	http.Options("/quack", [](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 		res.set_header("Access-Control-Allow-Headers", "*");
@@ -314,8 +314,8 @@ void QuackHandlers::Register(duckdb_httplib::Server &http) {
 
 	// The protocol. Each request increments the active-request counter
 	// via the ActiveRequestGuard so FlockHttpServer::Close() can drain.
-	http.Post("/quack", [self](const duckdb_httplib::Request &, duckdb_httplib::Response &res,
-	                           const duckdb_httplib::ContentReader &content_reader) {
+	http.Post("/quack", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res,
+	                           const duckdb_httplib_openssl::ContentReader &content_reader) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
 		res.set_header("Access-Control-Allow-Origin", "*");
 		MemoryStream stream;

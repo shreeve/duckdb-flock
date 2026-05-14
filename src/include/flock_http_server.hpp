@@ -37,6 +37,18 @@
 #include "duckdb/common/string.hpp"
 
 #include "quack_uri.hpp"
+
+// PR-3: migrate from duckdb_httplib (plain) to duckdb_httplib_openssl
+// (the OpenSSL-enabled cpp-httplib build) so UI handlers — whose
+// upstream code uses the openssl namespace — can register routes
+// against our shared server. The two namespaces produce separate C++
+// types (not interchangeable); the openssl variant has the same API
+// surface as plain plus HTTPS support. PR-2's "single httplib::Server
+// owner" invariant still holds — we just own the openssl variant
+// instead. The CI grep guard at .github/workflows/architecture-guard.yml
+// now matches both `duckdb_httplib::Server` and
+// `duckdb_httplib_openssl::Server`.
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 namespace duckdb {
@@ -107,7 +119,7 @@ public:
 	// this to their Register() methods. Asserts state == BOUND
 	// (registering a route while the listener is running is undefined
 	// per cpp-httplib).
-	duckdb_httplib::Server &Server();
+	duckdb_httplib_openssl::Server &Server();
 
 	// Accessors. Safe to call concurrently with the listener thread;
 	// these read immutable state set in the ctor or Bind().
@@ -160,7 +172,7 @@ private:
 	std::mutex state_mu;
 	State state = State::CONSTRUCTED;
 
-	unique_ptr<duckdb_httplib::Server> server;
+	unique_ptr<duckdb_httplib_openssl::Server> server;
 	std::thread listen_thread; // .joinable() == false until StartListening()
 
 	std::atomic<idx_t> active_requests {0};

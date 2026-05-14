@@ -14,6 +14,9 @@
 // Both routes are wrapped in FlockHttpServer::ActiveRequestGuard so
 // they participate in the drain-on-close handshake.
 
+// Match FlockHttpServer's openssl-enabled cpp-httplib (see header
+// comment in flock_http_server.hpp explaining the namespace migration).
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 namespace duckdb {
@@ -26,7 +29,7 @@ public:
 
 	// Register /health and /info against the shared server. Must be
 	// called between FlockHttpServer::Bind() and StartListening().
-	void Register(duckdb_httplib::Server &server);
+	void Register(duckdb_httplib_openssl::Server &server);
 
 private:
 	FlockHttpServer &server;
