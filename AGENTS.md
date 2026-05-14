@@ -21,6 +21,73 @@ Plus auth routes (`/auth/login`, `/auth/logout`) and convenience routes
 (`/health`, `/ready`, `/tables`, `/schema/:db/:t`, `/whoami`,
 `/checkpoint`, `/sessions`, `/interrupt`).
 
+## Implementation roadmap
+
+flock is being implemented in staged PRs. **Do not jump ahead** unless
+the PR explicitly says so. The current state of `src/` does not yet
+match the target architecture described in SPEC.md §2 — it gets there
+incrementally.
+
+| PR | Scope | Explicitly excluded |
+|----|---|---|
+| **PR-1** (current) | Vendor `duckdb-quack` source verbatim into `src/quack/`; rename build identifiers (`EXT_NAME`, `TARGET_NAME`, extension class) so the loadable extension is `flock.duckdb_extension`. Inherit upstream's `vcpkg.json` (openssl + curl). Keep upstream's `quack_serve`/`quack_stop`/`quack_check_token`/all settings intact. Add `flock_version()` scalar. `/quack` works against stock quack clients on day one. CI: linux_amd64 only. | Renaming SQL functions/settings to `flock_*`. `flock_serve`/`stop`/`wait` (semantics differ from `quack_serve`). Touching wire format. UI, `/sql`, admin. Architectural refactor. macOS/Windows CI. |
+| **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack golden tests pass throughout. Add CI grep guard (see PR-2 acceptance checklist below). | UI, `/sql`, admin handlers. |
+| **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. Origin/cookie auth. Bundled UI assets. flock-specific login wrapper at `GET /`. | `/sql`, admin. |
+| **PR-4** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
+| **PR-5** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
+| **PR-6+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
+
+When changing code, **keep docs and tests consistent with the current
+implementation status**. Don't promise anything in a release that PR-N
+hasn't actually delivered.
+
+### PR-1 is a transitional fork (read this if it confuses you)
+
+PR-1 ships a **renamed copy of duckdb-quack**, not flock's final
+architecture. Specifically:
+
+- `src/quack/quack_server.cpp` still owns its own `httplib::Server`.
+  This is *upstream quack's* shape, not the SPEC §2 architecture.
+- The SQL surface is `quack_serve`/`quack_stop`/`quack_check_token`/
+  etc., not `flock_serve`/`flock_stop`/`flock_wait`. Only `flock_version()`
+  is new.
+- `src/flock_http_server.{cpp,hpp}`, `src/flock_session.{cpp,hpp}`,
+  `src/flock_auth.{cpp,hpp}` **do not exist yet** — they land in PR-2.
+
+This is intentional. The PR-2 refactor extracts the server upward and
+introduces flock's target shape with quack's existing test suite as the
+regression spec. It is far easier to refactor working code than to
+write equivalents from scratch and discover what we got wrong only when
+we try to plug quack into them.
+
+### PR-2 acceptance checklist
+
+PR-2 is the architectural refactor and the highest-risk PR in the
+sequence. It MUST satisfy all of:
+
+- [ ] Exactly one `duckdb_httplib::Server` instance exists in the
+      process. It is owned by `FlockHttpServer`. `QuackHandlers` no
+      longer owns or constructs an httplib server.
+- [ ] No `QuackServer::listen` / `QuackServer::run` / equivalent.
+      Listening lifecycle lives entirely in `FlockHttpServer`.
+- [ ] `/health`, `/info`, and `/quack` are served by the same
+      `FlockHttpServer` instance on the same listening socket.
+- [ ] All upstream quack tests still pass. The quack golden roundtrip
+      script (in PR-2 form) passes.
+- [ ] CI grep guard active in `.github/workflows/build.yml`:
+      `grep -R "duckdb_httplib::Server" src | grep -v flock_http_server && exit 1`
+      (catches future regressions where another file accidentally
+      reintroduces server ownership).
+- [ ] `SessionManager` and `AuthManager` are standalone classes
+      constructed by `FlockHttpServer` and passed by reference to
+      `QuackHandlers`. No global session state lives inside
+      `QuackHandlers`.
+- [ ] `flock_serve`, `flock_stop`, `flock_wait` exist with SPEC §9
+      semantics. `quack_serve`, `quack_stop` (and other `quack_*`
+      functions/settings) remain as functional aliases.
+- [ ] AGENTS.md "Implementation roadmap" updated to reflect PR-2 done
+      and PR-3 next.
+
 ## Critical rules — read first
 
 - **`SPEC.md` is the source of truth for design decisions.** When in
@@ -80,14 +147,12 @@ DuckDB's community extension repo (planned) and GitHub Releases (today).
 | `src/flock_auth.{cpp,hpp}` | `AuthManager` — token + hook resolution, HMAC cookie sign/verify, `/auth/login` and `/auth/logout` handlers | Yes |
 | `src/flock_log.{cpp,hpp}` | `'Flock'` and `'HTTP'` log type registration | Yes |
 | `src/flock_wait.{cpp,hpp}` | Blocking `flock_wait()` table function — keeps the DuckDB process alive in container/daemon mode | Yes |
-| `flockd/main.cpp` | Thin C++ wrapper that `exec`s `duckdb -no-stdin -init flock-init.sql` so containers have a single `ENTRYPOINT` | Yes |
 | `src/quack/quack_handlers.{cpp,hpp}` | `/quack` route registration + dispatch | Yes (was `QuackServer` upstream) |
 | `src/quack/quack_message.{cpp,hpp}` | Wire format — match upstream | **Never** unless tracking upstream change |
 | `src/quack/quack_scan.{cpp,hpp}`, `src/quack/storage/*` | Client side (`ATTACH 'flock:host'`), unchanged from upstream Quack | Carefully |
 | `src/sql/sql_handlers.{cpp,hpp}` | `POST /sql` route, request parsing, NDJSON streaming | Yes |
 | `src/sql/sql_chunk_encoder.{cpp,hpp}` | `DataChunk` → NDJSON per SPEC §5.4 | Yes |
 | `src/ui/ui_handlers.{cpp,hpp}` | `/ddb/*`, `/info`, `/localEvents`, `/localToken` route registration | Yes (was `ui::HttpServer` upstream) |
-| `src/ui/ui_proxy.{cpp,hpp}` | `GET /.*` proxy to `ui.duckdb.org` (when `flock_ui_assets='proxy'`) | Yes |
 | `src/ui/ui_assets.{cpp,hpp}` | `GET /.*` from bundled assets (when `flock_ui_assets='bundled'`) | Yes |
 | `src/ui/ui_assets_data.cpp` | Generated const byte array of UI assets | **Never edit by hand** — regenerate via `scripts/fetch-ui-assets.sh` |
 | `src/admin/admin_handlers.{cpp,hpp}` | `/health`, `/tables`, `/schema`, `/whoami`, `/checkpoint`, `/sessions`, `/interrupt` | Yes |
@@ -135,7 +200,7 @@ FlockHttpServer (owns httplib::Server, listener thread, all subsystems)
 ├── SqlHandlers        .Register(httplib::Server&)  → /sql, /sql/sessions, /sql/cancel
 ├── UiHandlers         .Register(httplib::Server&)  → /ddb/*, /info, /localEvents, /localToken
 ├── AdminHandlers      .Register(httplib::Server&)  → /health, /ready, /whoami, /tables, /schema, /checkpoint, /sessions, /interrupt
-└── UiAssets|UiProxy   .Register(httplib::Server&)  → GET /.*    (MUST BE LAST — catch-all)
+└── UiAssets          .Register(httplib::Server&)  → GET /.*    (MUST BE LAST — catch-all)
 ```
 
 The handler subsystems are independent. None depends on another. They
@@ -175,9 +240,8 @@ The output is at `build/release/extension/flock/flock.duckdb_extension`.
 > **Daemon-mode pitfall.** `duckdb -c '…'` exits as soon as the last
 > statement returns, which tears down the flock server before you can
 > hit it from another terminal. Always include `CALL flock_wait();` at
-> the end of any non-interactive invocation, or use the bundled
-> `flockd` wrapper. The test harness also accepts an `&` background
-> form for shell loops — see below.
+> the end of any non-interactive invocation. The test harness also
+> accepts an `&` background form for shell loops — see below.
 
 Interactive (REPL stays open, server runs in background):
 
@@ -209,16 +273,6 @@ curl -sf -H "Authorization: Bearer $TOKEN" \
 
 kill $DUCK_PID
 wait $DUCK_PID 2>/dev/null
-```
-
-The `flockd` wrapper (built by `make release`) does the same thing in
-one command:
-
-```bash
-./build/release/flockd /tmp/test.duckdb &
-DUCK_PID=$!
-# ... tests ...
-kill $DUCK_PID
 ```
 
 ### Add a new SQL setting
@@ -336,8 +390,7 @@ tooling that filters on it.
   the server with it.** The DuckDB CLI exits as soon as `-c` finishes;
   the server thread goes with it. For non-interactive use, always
   follow `flock_serve(...)` with `CALL flock_wait();` (blocks until
-  `SIGTERM`/`SIGINT` or `flock_stop`), or use the bundled `flockd`
-  wrapper. See SPEC §2 "Daemon mode".
+  `SIGTERM`/`SIGINT` or `flock_stop`). See SPEC §2 "Daemon mode".
 - **`flock_serve(...)` is single-server-per-process.** A second call
   before `flock_stop` throws. Don't host two flock servers from one
   DuckDB process.

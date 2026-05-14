@@ -37,7 +37,7 @@ one session pool, and one auth/authz model.
   authorization, as user-supplied SQL macros or scalar UDFs. One model
   applies to every SQL-bearing endpoint.
 - **Container-ready deployment.** Designed to run as
-  `flockd /data/db.duckdb` (a thin wrapper around `duckdb`) inside a
+  `duckdb -no-stdin -init flock-init.sql /data/db.duckdb` inside a
   minimal Incus application container against a ZFS dataset for COW
   snapshots.
 
@@ -134,10 +134,8 @@ config visibility, no surprises in non-server contexts.
 
 The DuckDB CLI is fundamentally an interactive REPL. Running
 `duckdb -c '…'` exits immediately after the last statement runs, which
-would tear down the flock server. For non-interactive deployments, use
-**either**:
-
-**Option A — `flock_wait()` in the init script** (recommended):
+would tear down the flock server. For non-interactive deployments,
+**`flock_wait()` in an init script is the deployment pattern**:
 
 ```sql
 -- /etc/flock-init.sql
@@ -151,23 +149,19 @@ duckdb -no-stdin -init /etc/flock-init.sql /data/db.duckdb
 ```
 
 `flock_wait()` blocks until the server stops or `SIGTERM`/`SIGINT`
-arrives. The DuckDB process stays alive.
-
-**Option B — `flockd` wrapper binary** (also recommended for clarity):
-
-```bash
-flockd /data/db.duckdb                    # equivalent to Option A
-flockd --port 9494 --bind 0.0.0.0 ...     # CLI flags map to flock settings
-```
-
-`flockd` is a tiny C++ binary in this repo that `exec`s `duckdb` with
-the right `-init` and `-no-stdin` flags. Containers ship `flockd` as
-their `ENTRYPOINT`. Reverse-compat with people who already invoke
-`duckdb` directly is preserved by Option A.
+arrives. The DuckDB process stays alive. Without a trailing
+`flock_wait()` (or some other blocking statement), the CLI exits when
+the init script finishes and takes the server with it.
 
 Interactive use (`duckdb` at a terminal) is unaffected: `flock_serve`
 returns immediately, the REPL is still yours, and the server runs in
 the background.
+
+> A `flockd` wrapper binary that hides the `-no-stdin -init …`
+> incantation is intentionally not shipped — the unwrapped command is
+> short, an init script is more flexible than a fixed wrapper (operators
+> can install custom auth hooks, set globals, etc.), and the decision is
+> reversible if operator demand justifies it.
 
 ## 3. URIs and protocol identity
 
@@ -934,13 +928,12 @@ codified in `AGENTS.md` and verified by an integration test.
 
 ## 8. UI assets
 
-flock supports three modes for serving the UI HTML/JS/CSS at `GET /.*`,
+flock serves the UI HTML/JS/CSS at `GET /.*` from one of two modes,
 selected by setting `flock_ui_assets`:
 
 | Mode | Setting | Behavior |
 |---|---|---|
 | `bundled` (default) | `flock_ui_assets = 'bundled'` | Serves the UI from a const byte array compiled into the extension. Offline-capable. Bundle is ~10–15 MB. Refreshed by re-running `scripts/fetch-ui-assets.sh` and rebuilding the extension. |
-| `proxy` | `flock_ui_assets = 'proxy'` | Forwards `GET /.*` to `ui.duckdb.org` (matching upstream `duckdb-ui` behavior). Requires outbound network from the container. |
 | `disabled` | `flock_ui_assets = 'disabled'` | All `GET /.*` requests return `404`. The UI doesn't load. `/sql` and `/quack` still work. Useful for headless deployments. |
 
 In bundled mode, `GET /config` is intercepted to inject the same
@@ -948,6 +941,11 @@ In bundled mode, `GET /config` is intercepted to inject the same
 headers the upstream UI proxy adds. The bundled assets pin to a specific
 upstream UI commit hash, recorded in `UI_ASSETS_VERSION.txt` at the repo
 root.
+
+> **Runtime proxying to `ui.duckdb.org` is intentionally not in v0.1.**
+> It would require an HTTPS-capable cpp-httplib client, which would pull
+> OpenSSL into the build. Bundled mode covers the same surface without
+> the dependency. See §14 Roadmap.
 
 The flock login wrapper described in §7 lives at `GET /` (registered
 before the catch-all and before `/ui/`). The unmodified upstream UI
@@ -994,8 +992,7 @@ restored with `RESET GLOBAL`.
 | `flock_allow_admin_without_authz` | BOOLEAN | `false` | When the authz hook is the default permissive `flock_nop_authorization`, admin endpoints still default-deny unless this is set. Loud warning at startup if `true`. |
 | `flock_fetch_batch_chunks` | UBIGINT | `12` | Inherited from quack — chunks per FETCH. |
 | `flock_fetch_batch_bytes` | UBIGINT | `4194304` (4 MiB) | Inherited from quack. |
-| `flock_ui_assets` | VARCHAR | `bundled` | `bundled` / `proxy` / `disabled`. |
-| `flock_ui_proxy_url` | VARCHAR | `https://ui.duckdb.org` | Upstream URL when `flock_ui_assets = 'proxy'`. |
+| `flock_ui_assets` | VARCHAR | `bundled` | `bundled` / `disabled`. |
 | `flock_local_dev_mode` | BOOLEAN | `false` | Skip token requirement for local-bound, same-Origin requests. |
 | `flock_cors_origins` | VARCHAR | `''` (empty) | Comma-separated allow-list of origins for cross-origin `/sql`, `/quack`, `/auth/*`. |
 | `flock_log_requests` | BOOLEAN | `true` | Per-request structured log entry. |
@@ -1112,14 +1109,11 @@ duckdb-flock/
 │   │   └── sql_chunk_encoder.{cpp,hpp}
 │   ├── ui/                           ← derived from duckdb-ui
 │   │   ├── ui_handlers.{cpp,hpp}
-│   │   ├── ui_proxy.{cpp,hpp}
 │   │   ├── ui_assets.{cpp,hpp}
 │   │   ├── ui_assets_data.cpp        ← generated; const byte array
 │   │   └── ui_login_page.{cpp,hpp}   ← flock-specific login wrapper at GET /
 │   └── admin/
 │       └── admin_handlers.{cpp,hpp}
-├── flockd/
-│   └── main.cpp                      ← thin C++ wrapper, exec's duckdb with right flags
 ├── scripts/
 │   ├── fetch-ui-assets.sh
 │   ├── golden-quack-roundtrip.sh
@@ -1145,12 +1139,11 @@ Standard DuckDB extension build via `extension-ci-tools`:
 
 ```bash
 make release             # builds ./build/release/extension/flock/flock.duckdb_extension
-                         # and ./build/release/flockd
 make debug
 make test                # runs unit + integration suites
 ```
 
-CI matrix produces `flock.duckdb_extension` (and `flockd`) for
+CI matrix produces `flock.duckdb_extension` for
 `osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`.
 Distribution is via DuckDB's community-extension repository once that's
 set up; until then, GitHub Releases.
@@ -1163,10 +1156,10 @@ Reference layout, documented in [`docs/DEPLOY_INCUS_ZFS.md`](./docs/DEPLOY_INCUS
 host
 ├── /tank/duckdb/<tenant>/                  ← ZFS dataset, COW snapshots
 │   ├── db.duckdb
+│   ├── flock-init.sql                      ← LOAD flock; flock_serve(...); flock_wait();
 │   └── flock-token                         ← created at first boot
 └── incus container "flock-<tenant>"
     ├── /usr/bin/duckdb                     ← DuckDB binary
-    ├── /usr/bin/flockd                     ← flock wrapper
     ├── /root/.duckdb/extensions/.../flock.duckdb_extension
     └── /data → bind-mount of /tank/duckdb/<tenant>/
 ```
@@ -1174,7 +1167,7 @@ host
 The container's `ENTRYPOINT` is one command:
 
 ```bash
-flockd /data/db.duckdb
+duckdb -no-stdin -init /data/flock-init.sql /data/db.duckdb
 ```
 
 Snapshot policy: pre-snapshot `POST /checkpoint`, then
@@ -1203,7 +1196,7 @@ Snapshot policy: pre-snapshot `POST /checkpoint`, then
 | Catch-all order | `GET /.*` does not shadow `/info`, `/health`, `/ready`, etc. | `test/integration/` |
 | Asset bundle | `flock_ui_assets = 'bundled'` serves the same bytes a real UI build expects | `test/integration/` |
 | Identifier safety | `GET /schema/:db/:table` with malicious path parameters cannot SQL-inject | `test/integration/` |
-| Daemon mode | `flockd db.duckdb` keeps the process alive until `SIGTERM` | `test/integration/` |
+| Daemon mode | `duckdb -no-stdin -init flock-init.sql db.duckdb` with `flock_wait()` keeps the process alive until `SIGTERM` | `test/integration/` |
 
 CI runs all suites against each platform binary on every PR.
 
@@ -1211,6 +1204,16 @@ CI runs all suites against each platform binary on every PR.
 
 Explicitly **out of scope for v0.1**, listed for record:
 
+- **UI asset proxy mode** (`flock_ui_assets='proxy'`) — runtime fetch
+  from `ui.duckdb.org` instead of serving from the bundled byte array.
+  Requires bringing OpenSSL into the build for the cpp-httplib HTTPS
+  client. Bundled mode covers the same surface today; proxy is on the
+  roadmap for deployments that want zero-rebuild UI updates.
+- **`flockd` wrapper binary** — a tiny C++ binary that hides the
+  `duckdb -no-stdin -init …` invocation behind `flockd /data/db.duckdb`.
+  Not shipped in v0.1: the unwrapped command is short, an init script is
+  more flexible than a fixed wrapper, and the decision is reversible if
+  operator demand justifies the extra binary.
 - **Arrow stream output on `/sql`** — `Accept: application/vnd.apache.arrow.stream`
   for full-fidelity column-store interchange.
 - **`/metrics`** Prometheus endpoint.

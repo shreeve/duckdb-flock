@@ -13,6 +13,17 @@ session pool and auth model.
 > (`v1.5-variegata`) and `duckdb-ui`. Targets DuckDB v1.5.2; will
 > rebase to DuckDB v2.0 GA when it lands. The full design is in
 > [`SPEC.md`](./SPEC.md).
+>
+> **Implementation status:** This README describes the v0.1 *target*.
+> The repo is being implemented in staged PRs (see [`AGENTS.md`](./AGENTS.md)
+> "Implementation roadmap"). PR-1 vendors `duckdb-quack` source verbatim
+> as `src/quack/` and renames the build identifier to `flock` — `/quack`
+> works against stock quack clients on day one, but the SQL surface is
+> still `quack_serve`/`quack_stop`/etc. (plus a new `flock_version()`).
+> The `flock_serve`/`flock_wait` lifecycle, `FlockHttpServer`, `/health`,
+> `/info`, `/sql`, the bundled DuckDB UI, admin endpoints, and the
+> auth-cookie flow all land in subsequent PRs. Examples below describe
+> the eventual API; what works *today* depends on which PR has merged.
 
 ## Quick Start
 
@@ -43,8 +54,8 @@ the session.
 > **Heads-up for non-interactive use.** `flock_serve` returns
 > immediately so you can keep using your DuckDB REPL. To run flock as a
 > daemon (containers, systemd) you need to keep the DuckDB process
-> alive — either call `CALL flock_wait();` after `flock_serve`, or use
-> the bundled `flockd` wrapper. See [Deployment](#deployment--incus--zfs).
+> alive: call `CALL flock_wait();` after `flock_serve`. See
+> [Deployment](#deployment--incus--zfs).
 
 ## What It Does
 
@@ -241,9 +252,9 @@ restrictions, and HTTPS for any non-localhost target.
 - **Pluggable auth.** Token + per-connection authentication and per-query authorization, as user-supplied SQL macros. One model covers `/quack`, `/sql`, `/ddb/run`, and admin endpoints.
 - **Streaming `/sql`.** Large result sets stream as NDJSON over chunked transfer encoding.
 - **Schema-typed encoding.** `/sql` NDJSON encodes every DuckDB core type losslessly when decoded with the schema record (DECIMAL preserves width/scale, TIMESTAMP preserves precision, INTERVAL preserves all three components, BIGINT/HUGEINT as strings to dodge JS precision loss).
-- **Bundled UI assets.** No outbound network required; `flock_ui_assets='proxy'` is available for development.
+- **Bundled UI assets.** No outbound network required; assets are compiled into the extension.
 - **Upstream-compatible Quack.** Stock DuckDB clients work without modification.
-- **Container-ready.** Designed to be deployed as `flockd /data/db.duckdb` against a ZFS dataset.
+- **Container-ready.** Designed to be deployed as `duckdb -no-stdin -init flock-init.sql /data/db.duckdb` against a ZFS dataset.
 
 ## How It's Built
 
@@ -317,10 +328,10 @@ The intended deployment shape:
 host
 ├── /tank/duckdb/<tenant>/                  ← ZFS dataset (COW snapshots)
 │   ├── db.duckdb
+│   ├── flock-init.sql                      ← LOAD flock; flock_serve(...); flock_wait();
 │   └── flock-token
 └── incus container "flock-<tenant>"
     ├── /usr/bin/duckdb
-    ├── /usr/bin/flockd                     ← flock wrapper (keeps process alive)
     ├── /root/.duckdb/extensions/.../flock.duckdb_extension
     └── /data → bind-mount of /tank/duckdb/<tenant>/
 ```
@@ -328,17 +339,19 @@ host
 The container's `ENTRYPOINT` is one command:
 
 ```bash
-flockd /data/db.duckdb
+duckdb -no-stdin -init /data/flock-init.sql /data/db.duckdb
 ```
 
-Behind the scenes, `flockd` runs `duckdb -no-stdin -init flock-init.sql
-/data/db.duckdb`, where `flock-init.sql` is:
+Where `flock-init.sql` is:
 
 ```sql
 LOAD flock;
 CALL flock_serve('flock:0.0.0.0:9494');
 CALL flock_wait();              -- blocks until SIGTERM/SIGINT
 ```
+
+`flock_wait()` is required: without it, the DuckDB CLI exits as soon as
+the init script finishes and takes the server with it.
 
 Operations collapse to ZFS verbs:
 
@@ -368,7 +381,7 @@ All settings are regular DuckDB session/global options.
 | `flock_session_ttl_s` | `3600` | Idle session TTL |
 | `flock_query_timeout_s` | `0` | Per-query timeout (0 disables) |
 | `flock_max_request_body_bytes` | `268435456` (256 MiB) | Per-request body cap |
-| `flock_ui_assets` | `bundled` | `bundled` / `proxy` / `disabled` |
+| `flock_ui_assets` | `bundled` | `bundled` / `disabled` |
 | `flock_cors_origins` | `''` | Allow-list for cross-origin browser requests |
 | `flock_log_requests` | `true` | Per-request structured log |
 | `flock_log_queries` | `false` | Log full SQL of every query |
