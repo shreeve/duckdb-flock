@@ -1,0 +1,57 @@
+# Architecture invariant: exactly one duckdb_httplib::Server in the
+# process, owned by FlockHttpServer (per AGENTS.md PR-2 acceptance
+# checklist). This guard catches future regressions where another
+# subsystem accidentally constructs its own httplib server instead
+# of registering routes against the shared one.
+#
+# What we grep for:
+#   - make_uniq<duckdb_httplib::Server>   (construction)
+#   - unique_ptr<duckdb_httplib::Server>  (sole-ownership members)
+#   - shared_ptr<duckdb_httplib::Server>  (shared ownership)
+#
+# What we DON'T grep for (these are fine):
+#   - duckdb_httplib::Server &            (handler refs taking the shared instance)
+#   - duckdb_httplib::Server *            (raw pointers — same)
+#   - mentions in comments / docs
+#
+# If this fails for a legitimate reason (e.g., we add a second
+# listener for some good reason), update the allow-list below AND
+# update AGENTS.md to reflect the new architecture invariant.
+
+name: Architecture invariants
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  one-httplib-server:
+    name: Single duckdb_httplib::Server owner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: grep for stray duckdb_httplib::Server owners
+        run: |
+          set -e
+          echo "Checking that duckdb_httplib::Server is owned only by flock_http_server.{cpp,hpp}..."
+          # Match construction (make_uniq) and ownership (unique_ptr/shared_ptr).
+          # The allow-list excludes flock_http_server.{cpp,hpp} (the canonical owner).
+          PATTERN='(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib::Server\s*>'
+          if grep -REn --include='*.cpp' --include='*.hpp' "$PATTERN" src \
+               | grep -v "src/include/flock_http_server.hpp" \
+               | grep -v "src/flock_http_server.cpp"; then
+            echo ""
+            echo "ERROR: duckdb_httplib::Server is constructed or owned outside"
+            echo "src/flock_http_server.{cpp,hpp}. Per AGENTS.md PR-2 acceptance"
+            echo "checklist, FlockHttpServer is the only owner."
+            echo ""
+            echo "If this is intentional, update the allow-list in"
+            echo ".github/workflows/architecture-guard.yml AND document the change"
+            echo "in AGENTS.md (Implementation roadmap section)."
+            exit 1
+          fi
+          echo "OK: duckdb_httplib::Server ownership is clean."

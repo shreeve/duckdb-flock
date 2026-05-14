@@ -31,9 +31,9 @@ incrementally.
 | PR | Scope | Explicitly excluded |
 |----|---|---|
 | **PR-1** | Vendor `duckdb-quack` source verbatim into `src/quack/`; rename build identifiers (`EXT_NAME`, `TARGET_NAME`, extension class) so the loadable extension is `flock.duckdb_extension`. Inherit upstream's `vcpkg.json` (openssl + curl). Keep upstream's `quack_serve`/`quack_stop`/`quack_check_token`/all settings intact. Add `flock_version()` scalar. `/quack` works against stock quack clients on day one. | Renaming SQL functions/settings to `flock_*`. `flock_serve`/`stop`/`wait` (semantics differ from `quack_serve`). Touching wire format. UI, `/sql`, admin. Architectural refactor. |
-| **PR-1.5** (current) | Enable `LOAD_TESTS` so `test/sql/flock.test` actually runs in CI. Extend the smoke test with a `/quack` runtime roundtrip block (con1 hosts via `quack_serve`, con2 attaches via `quack_query`, transactions/secrets/auth-failure all exercised, clean `quack_stop`). Document the five surgical edits to vendored `quack_extension.cpp` in [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md). Add the roundtrip-passes-after-refactor item to the PR-2 acceptance checklist below. | Anything that changes wire format or production behavior. PR-1.5 is purely test/doc infrastructure that PR-2's refactor can be measured against. |
-| **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack golden tests pass throughout. Add CI grep guard (see PR-2 acceptance checklist below). | UI, `/sql`, admin handlers. |
-| **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. UI assets via `proxy` mode (forward `GET /.*` to `ui.duckdb.org` over OpenSSL-backed cpp-httplib HTTPS client — `bundled` mode is post-v0.1, see SPEC §14). Origin/cookie auth, with `src/flock_crypto.{cpp,hpp}` providing thin C++ wrappers around OpenSSL `libcrypto` for SHA-256 (`principal_id` derivation per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), and CSPRNG (`RAND_bytes` for cookie keys + session IDs). flock-specific login wrapper at `GET /`. | `/sql`, admin. `bundled` UI assets mode. Vendored crypto (we use OpenSSL directly — no need for Brad Conte SHA-256 or hand-rolled HMAC). |
+| **PR-1.5** | Enable `LOAD_TESTS` so `test/sql/flock.test` actually runs in CI. Extend the smoke test with a `/quack` runtime roundtrip block (con1 hosts via `quack_serve`, con2 attaches via `quack_query`, transactions/secrets/auth-failure all exercised, clean `quack_stop`). Document the five surgical edits to vendored `quack_extension.cpp` in [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md). Add the roundtrip-passes-after-refactor item to the PR-2 acceptance checklist below. | Anything that changes wire format or production behavior. PR-1.5 is purely test/doc infrastructure that PR-2's refactor can be measured against. |
+| **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack roundtrip test passes throughout. CI grep guard active. | UI, `/sql`, admin handlers. |
+| **PR-3** (current) | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. UI assets via `proxy` mode (forward `GET /.*` to `ui.duckdb.org` over OpenSSL-backed cpp-httplib HTTPS client — `bundled` mode is post-v0.1, see SPEC §14). Origin/cookie auth, with `src/flock_crypto.{cpp,hpp}` providing thin C++ wrappers around OpenSSL `libcrypto` for SHA-256 (`principal_id` derivation per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), and CSPRNG (`RAND_bytes` for cookie keys + session IDs). flock-specific login wrapper at `GET /`. | `/sql`, admin. `bundled` UI assets mode. Vendored crypto (we use OpenSSL directly — no need for Brad Conte SHA-256 or hand-rolled HMAC). |
 | **PR-4** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
 | **PR-5** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
 | **PR-6+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
@@ -42,61 +42,85 @@ When changing code, **keep docs and tests consistent with the current
 implementation status**. Don't promise anything in a release that PR-N
 hasn't actually delivered.
 
-### PR-1 is a transitional fork (read this if it confuses you)
+### Architecture as of PR-2
 
-PR-1 ships a **renamed copy of duckdb-quack**, not flock's final
-architecture. Specifically:
+The PR-2 refactor dissolved upstream quack's `QuackServer` /
+`HttpQuackServer` hierarchy and brought flock's target architecture
+online. The current state of `src/`:
 
-- `src/quack/quack_server.cpp` still owns its own `httplib::Server`.
-  This is *upstream quack's* shape, not the SPEC §2 architecture.
-- The SQL surface is `quack_serve`/`quack_stop`/`quack_check_token`/
-  etc., not `flock_serve`/`flock_stop`/`flock_wait`. Only `flock_version()`
-  is new.
-- `src/flock_http_server.{cpp,hpp}`, `src/flock_session.{cpp,hpp}`,
-  `src/flock_auth.{cpp,hpp}` **do not exist yet** — they land in PR-2.
+- `src/include/flock_http_server.hpp` + `src/flock_http_server.cpp`
+  own the only `duckdb_httplib::Server` in the process. Enforced by
+  the `Single duckdb_httplib::Server owner` check in
+  `.github/workflows/architecture-guard.yml`.
+- `src/include/flock_session.hpp` + `src/flock_session.cpp` hold the
+  per-process session pool (`SessionManager` + `FlockSession`),
+  shared by `QuackHandlers` (today) and future UI/SQL handlers.
+- `src/include/flock_auth.hpp` + `src/flock_auth.cpp` hold the auth
+  callback resolution (`AuthManager`). Cookie/principal model
+  arrives in PR-3.
+- `src/quack/quack_server.{cpp,hpp}` is now a stateless `QuackHandlers`
+  class that registers `/quack` and `OPTIONS /quack` routes against
+  the shared server. It borrows references to SessionManager + AuthManager
+  via its ctor.
+- `flock_serve` / `flock_stop` / `flock_wait` are the SPEC §9
+  lifecycle SQL functions. `quack_serve` / `quack_stop` are kept as
+  thin shims that delegate to the same `FlockServerState::Global()`,
+  so stock-quack tooling continues to work.
+- `/health` and `/info` are served by `AdminHandlers`. The full admin
+  surface (`/whoami`, `/tables`, `/checkpoint`, etc.) lands in PR-5.
 
-This is intentional. The PR-2 refactor extracts the server upward and
-introduces flock's target shape with quack's existing test suite as the
-regression spec. It is far easier to refactor working code than to
-write equivalents from scratch and discover what we got wrong only when
-we try to plug quack into them.
+Wire format on `/quack` is byte-identical to upstream Quack — the
+`/quack` roundtrip block in `test/sql/flock.test` (introduced PR-1.5)
+verifies this on every CI run.
 
-### PR-2 acceptance checklist
+### PR-2 acceptance checklist (closed — kept here as architectural reference)
 
-PR-2 is the architectural refactor and the highest-risk PR in the
-sequence. It MUST satisfy all of:
+PR-2 was the architectural refactor and the highest-risk PR in the
+sequence. All acceptance criteria were satisfied at merge time and
+remain load-bearing invariants going forward:
 
-- [ ] Exactly one `duckdb_httplib::Server` instance exists in the
+- [x] Exactly one `duckdb_httplib::Server` instance exists in the
       process. It is owned by `FlockHttpServer`. `QuackHandlers` no
       longer owns or constructs an httplib server.
-- [ ] No `QuackServer::listen` / `QuackServer::run` / equivalent.
-      Listening lifecycle lives entirely in `FlockHttpServer`.
-- [ ] `/health`, `/info`, and `/quack` are served by the same
+- [x] No `QuackServer::listen` / `QuackServer::run` / equivalent.
+      Listening lifecycle lives entirely in `FlockHttpServer`
+      (the entire `QuackServer` base class and `HttpQuackServer`
+      derived class were deleted; `src/quack/quack_http_server.cpp`
+      is gone from the tree).
+- [x] `/health`, `/info`, and `/quack` are served by the same
       `FlockHttpServer` instance on the same listening socket.
-- [ ] All upstream quack tests still pass. The quack golden roundtrip
-      script (in PR-2 form) passes.
-- [ ] CI grep guard active in `.github/workflows/build.yml`:
-      `grep -R "duckdb_httplib::Server" src | grep -v flock_http_server && exit 1`
+- [x] The PR-1.5 `/quack` runtime roundtrip in `test/sql/flock.test`
+      still passes unchanged (auth happy + failure paths,
+      multi-statement transactions, secret-based auth, large-result
+      FETCH chunking, idempotent `quack_stop`, post-stop IO error).
+      This proves wire format and lifecycle survived the refactor.
+- [x] CI grep guard active in `.github/workflows/architecture-guard.yml`:
+      `grep -REn '(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib::Server\s*>' src`
+      must produce no matches outside `src/{include/,}flock_http_server.*`
       (catches future regressions where another file accidentally
       reintroduces server ownership).
-- [ ] `SessionManager` and `AuthManager` are standalone classes
+- [x] `SessionManager` and `AuthManager` are standalone classes
       constructed by `FlockHttpServer` and passed by reference to
       `QuackHandlers`. No global session state lives inside
       `QuackHandlers`.
-- [ ] `flock_serve`, `flock_stop`, `flock_wait` exist with SPEC §9
-      semantics. `quack_serve`, `quack_stop` (and other `quack_*`
-      functions/settings) remain as functional aliases.
-- [ ] `test/sql/flock.test`'s `/quack` roundtrip block (introduced in
-      PR-1.5 as the regression baseline) still **passes unchanged** —
-      same return values, same error fragments matched, same shutdown
-      semantics. The test file itself should not need editing; if PR-2
-      forces test edits, that's a sign behavior changed observably.
-      This is the single hardest line in the checklist: it proves the
-      refactor preserved wire-format and lifecycle behavior the only way
-      that matters (a real quack-protocol client talking to a real
-      server over HTTP).
-- [ ] AGENTS.md "Implementation roadmap" updated to reflect PR-2 done
+- [x] `flock_serve`, `flock_stop`, `flock_wait` exist with SPEC §9
+      semantics (single-server-per-process; generation-counter `Wait()`
+      for restart races). `quack_serve`, `quack_stop` (and the rest of
+      the `quack_*` functions/settings) remain as functional aliases
+      delegating to the same `FlockServerState::Global()`.
+- [x] AGENTS.md "Implementation roadmap" updated to reflect PR-2 done
       and PR-3 next.
+
+Two follow-up TODOs were captured in code as comments at PR-2 merge:
+
+1. **Listener thread exception observability**
+   (`src/flock_http_server.cpp::ListenThreadMain`) — listen exceptions
+   are silently swallowed. PR-3+ should route through the `Flock` log
+   type with the exception string.
+2. **CORS wildcard on `/quack`** (`src/quack/quack_server.cpp::Register`)
+   — `Access-Control-Allow-Origin: *` is fine for `/quack`-only today
+   (no cookies flow through `/quack`); PR-3 must replace with the
+   configured `flock_cors_origins` allow-list when cookie auth arrives.
 
 ## Critical rules — read first
 
