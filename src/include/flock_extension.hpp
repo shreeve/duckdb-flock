@@ -20,6 +20,13 @@
 // renaming the implementation. PR-2 may rename the C++ class to
 // FlockExtension proper and remove this façade.
 //
+// File location: `src/include/flock_extension.hpp` is the default
+// INCLUDE_DIR DuckDB uses for an extension whose `duckdb_extension_load`
+// call doesn't set INCLUDE_DIR explicitly (see
+// duckdb/extension/extension_build_tools.cmake's `duckdb_extension_load`,
+// `INCLUDE_PATH_DEFAULT`). Don't move this file without also setting
+// INCLUDE_DIR in `extension_config.cmake`.
+//
 // Method dispatch: Extension::Load() and Extension::Name() are virtual
 // in the DuckDB base, and QuackExtension overrides both. Inheriting
 // from QuackExtension and providing no body means LoadStaticExtension's
