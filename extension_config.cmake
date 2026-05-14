@@ -1,8 +1,11 @@
 # This file is included by DuckDB's build system. It specifies which extension to load.
 
-# Extension from this repo
+# Extension from this repo. LOAD_TESTS opts the sqllogictests under
+# test/sql/ into DuckDB's unittest binary discovery — without this,
+# test/sql/flock.test exists but never runs in CI.
 duckdb_extension_load(flock
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
+    LOAD_TESTS
 )
 
 # Extra extensions inherited from upstream duckdb-quack — quack's storage layer

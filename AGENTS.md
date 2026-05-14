@@ -30,7 +30,8 @@ incrementally.
 
 | PR | Scope | Explicitly excluded |
 |----|---|---|
-| **PR-1** (current) | Vendor `duckdb-quack` source verbatim into `src/quack/`; rename build identifiers (`EXT_NAME`, `TARGET_NAME`, extension class) so the loadable extension is `flock.duckdb_extension`. Inherit upstream's `vcpkg.json` (openssl + curl). Keep upstream's `quack_serve`/`quack_stop`/`quack_check_token`/all settings intact. Add `flock_version()` scalar. `/quack` works against stock quack clients on day one. CI: linux_amd64 only. | Renaming SQL functions/settings to `flock_*`. `flock_serve`/`stop`/`wait` (semantics differ from `quack_serve`). Touching wire format. UI, `/sql`, admin. Architectural refactor. macOS/Windows CI. |
+| **PR-1** | Vendor `duckdb-quack` source verbatim into `src/quack/`; rename build identifiers (`EXT_NAME`, `TARGET_NAME`, extension class) so the loadable extension is `flock.duckdb_extension`. Inherit upstream's `vcpkg.json` (openssl + curl). Keep upstream's `quack_serve`/`quack_stop`/`quack_check_token`/all settings intact. Add `flock_version()` scalar. `/quack` works against stock quack clients on day one. | Renaming SQL functions/settings to `flock_*`. `flock_serve`/`stop`/`wait` (semantics differ from `quack_serve`). Touching wire format. UI, `/sql`, admin. Architectural refactor. |
+| **PR-1.5** (current) | Enable `LOAD_TESTS` so `test/sql/flock.test` actually runs in CI. Extend the smoke test with a `/quack` runtime roundtrip block (con1 hosts via `quack_serve`, con2 attaches via `quack_query`, transactions/secrets/auth-failure all exercised, clean `quack_stop`). Document the five surgical edits to vendored `quack_extension.cpp` in [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md). Add the roundtrip-passes-after-refactor item to the PR-2 acceptance checklist below. | Anything that changes wire format or production behavior. PR-1.5 is purely test/doc infrastructure that PR-2's refactor can be measured against. |
 | **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack golden tests pass throughout. Add CI grep guard (see PR-2 acceptance checklist below). | UI, `/sql`, admin handlers. |
 | **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. Origin/cookie auth. Bundled UI assets. flock-specific login wrapper at `GET /`. | `/sql`, admin. |
 | **PR-4** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
@@ -85,6 +86,15 @@ sequence. It MUST satisfy all of:
 - [ ] `flock_serve`, `flock_stop`, `flock_wait` exist with SPEC §9
       semantics. `quack_serve`, `quack_stop` (and other `quack_*`
       functions/settings) remain as functional aliases.
+- [ ] `test/sql/flock.test`'s `/quack` roundtrip block (introduced in
+      PR-1.5 as the regression baseline) still **passes unchanged** —
+      same return values, same error fragments matched, same shutdown
+      semantics. The test file itself should not need editing; if PR-2
+      forces test edits, that's a sign behavior changed observably.
+      This is the single hardest line in the checklist: it proves the
+      refactor preserved wire-format and lifecycle behavior the only way
+      that matters (a real quack-protocol client talking to a real
+      server over HTTP).
 - [ ] AGENTS.md "Implementation roadmap" updated to reflect PR-2 done
       and PR-3 next.
 
@@ -101,8 +111,12 @@ sequence. It MUST satisfy all of:
   See "Reading upstream" below.
 - **Never break Quack wire compatibility.** A vanilla DuckDB client with
   the upstream `quack` extension installed must `ATTACH 'quack:host'`
-  successfully against a flock server. Golden tests in
-  `test/golden/quack/` enforce this.
+  successfully against a flock server. The roundtrip block in
+  `test/sql/flock.test` (introduced PR-1.5) is the current regression
+  spec; full byte-level golden tests in `test/golden/quack/` will land
+  later. Anytime you touch vendored quack code (per
+  [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md))
+  or PR-2's refactor: rerun the roundtrip block locally and in CI.
 - **Never break UI wire compatibility.** The official DuckDB UI built
   against the pinned `duckdb-ui` commit must work against `GET /` and
   `POST /ddb/*` byte-for-byte. Golden tests in `test/golden/ui/`

@@ -1,32 +1,132 @@
 # name: test/sql/flock.test
-# description: PR-1 smoke test — extension loads and exports flock_version()
+# description: PR-1 smoke + /quack runtime roundtrip (the regression
+#              baseline for PR-2's architectural refactor)
 # group: [sql]
+#
+# Verifies:
+#   1. The flock extension loads and exports flock-named identifiers
+#      (smoke surface — proves static-link + SQL-surface registration).
+#   2. quack_serve starts a server, the wire format on POST /quack works
+#      end-to-end (a quack-protocol client successfully attaches and
+#      runs queries), and quack_stop tears it down cleanly.
+#
+# This file IS the regression harness for PR-2's FlockHttpServer
+# extraction. When PR-2 dissolves QuackServer's embedded httplib::Server
+# into a shared FlockHttpServer, every assertion in this file must
+# remain green. Modeled on duckdb-quack's test/sql/rpc.test (same
+# con1/con2 pattern); kept narrower to focus on what PR-2 might break.
 
 require flock
+
+require httpfs
 
 statement ok
 LOAD flock;
 
-# The flock-named SQL surface is reachable. PR-1 promises only the
-# existence of these identifiers; semantics live in PR-2+.
+# ------------------------------------------------------------------
+# Smoke surface — extension loaded, flock-named identifiers reachable
+# ------------------------------------------------------------------
+
 query I
 SELECT CASE WHEN flock_version() IS NOT NULL THEN 1 ELSE 0 END;
 ----
 1
 
-# The flock_version() return is non-empty (CMake should set
-# EXT_VERSION_FLOCK at build time; the fallback "unknown" is also
-# acceptable for source builds without git tags).
 query I
 SELECT CASE WHEN length(flock_version()) > 0 THEN 1 ELSE 0 END;
 ----
 1
 
-# The vendored quack SQL surface is intact. PR-1 promises only that
-# these names exist, not that all semantics are exercised here — that
-# coverage lives in the vendored quack tests we'll wire up later.
 statement ok
 SELECT quack_check_token('sid', 'tok', 'tok');
 
 statement ok
 SELECT quack_nop_authorization('sid', 'SELECT 1');
+
+# ------------------------------------------------------------------
+# /quack roundtrip — start server on con1, query from con2 over HTTP
+# ------------------------------------------------------------------
+
+set ignore_error_messages __none__
+
+# Use an explicit non-default port (19494, not the default 9494) to
+# minimize the chance of a stale process or a parallel job colliding
+# with us. quack_serve accepts `quack:host:port`.
+query III con1
+CALL quack_serve('quack:localhost:19494', token='flock-test-token');
+----
+quack:localhost:19494	http://localhost:19494	flock-test-token
+
+# Wait for the listener thread to finish binding. 500ms is conservative
+# but cheap; the upstream test uses 100ms but flakiness in CI under
+# load is more painful than 400ms of test time.
+sleep 500 millisecond
+
+# Successful query with the right token via direct quack_query.
+# This exercises the full /quack request/response wire format —
+# CONNECTION_REQUEST → CONNECTION_RESPONSE → PREPARE_REQUEST →
+# PREPARE_RESPONSE → DISCONNECT_MESSAGE — encoded with the upstream
+# BinarySerializer at the pinned compatibility version.
+query I con2
+FROM quack_query('quack:localhost:19494', 'SELECT 42', token='flock-test-token')
+----
+42
+
+# Auth failure: wrong token rejected. Verifies authentication callback
+# resolution (quack_authentication_function setting → quack_check_token
+# default → string compare) still works after our flock-specific edits
+# to quack_extension.cpp.
+statement error con2
+FROM quack_query('quack:localhost:19494', 'SELECT 42', token='wrong-token')
+----
+Authentication failed
+
+# Secret-based auth: store token in a secret, omit from the call.
+# Exercises the QuackSecret type registration.
+statement ok con2
+CREATE SECRET (TYPE quack, TOKEN 'flock-test-token', SCOPE 'quack:localhost:19494')
+
+query I con2
+FROM quack_query('quack:localhost:19494', 'SELECT 42')
+----
+42
+
+# Multi-row result — exercises the FETCH path.
+query I con2
+FROM quack_query('quack:localhost:19494', 'FROM range(5)')
+----
+0
+1
+2
+3
+4
+
+# Larger result that exceeds one chunk — exercises FETCH chunking.
+query I con2
+SELECT max(range) FROM quack_query('quack:localhost:19494', 'FROM range(100000)')
+----
+99999
+
+# Multi-statement state inside a single quack_query call (transactions
+# work end-to-end — this is a property we want to guarantee survives
+# the PR-2 refactor of session lifecycle). Idempotent setup so that a
+# stale state from a previous run doesn't fail the test.
+query I con2
+FROM quack_query('quack:localhost:19494', 'DROP TABLE IF EXISTS flock_test_t; CREATE TABLE flock_test_t(i INT); INSERT INTO flock_test_t VALUES (1), (2), (3); SELECT count(*) FROM flock_test_t')
+----
+3
+
+# Clean shutdown.
+statement ok con1
+CALL quack_stop('quack:localhost:19494')
+
+# Repeat shutdown is idempotent (returns "no server found" but does not
+# error).
+statement ok con1
+CALL quack_stop('quack:localhost:19494')
+
+# After stop, queries fail with IO error (server is gone).
+statement error con2
+FROM quack_query('quack:localhost:19494', 'SELECT 42')
+----
+IO Error
