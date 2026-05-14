@@ -11,10 +11,9 @@
 // needs (SHA-256 / HMAC-SHA256 / CSPRNG) come from OpenSSL libcrypto
 // via src/flock_crypto.{cpp,hpp} (introduced in PR-3, not here).
 
-#include <string>
-
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/string.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector.hpp"
 
