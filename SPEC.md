@@ -928,13 +928,17 @@ codified in `AGENTS.md` and verified by an integration test.
 
 ## 8. UI assets
 
-flock serves the UI HTML/JS/CSS at `GET /.*` from one of two modes,
+flock serves the UI HTML/JS/CSS at `GET /.*` from one of three modes,
 selected by setting `flock_ui_assets`:
 
 | Mode | Setting | Behavior |
 |---|---|---|
-| `bundled` (default) | `flock_ui_assets = 'bundled'` | Serves the UI from a const byte array compiled into the extension. Offline-capable. Bundle is ~10–15 MB. Refreshed by re-running `scripts/fetch-ui-assets.sh` and rebuilding the extension. |
+| `proxy` (default) | `flock_ui_assets = 'proxy'` | Forwards `GET /.*` to `ui.duckdb.org` (matches upstream `duckdb-ui` behavior). Requires outbound network from the host. UI updates take effect immediately, no rebuild needed. |
+| `bundled` | `flock_ui_assets = 'bundled'` | Serves the UI from a const byte array compiled into the extension. Offline-capable. Bundle is ~10–15 MB. Refreshed by re-running `scripts/fetch-ui-assets.sh` and rebuilding the extension. Use this for air-gapped or restricted-egress deployments. |
 | `disabled` | `flock_ui_assets = 'disabled'` | All `GET /.*` requests return `404`. The UI doesn't load. `/sql` and `/quack` still work. Useful for headless deployments. |
+
+The proxy URL is configurable via `flock_ui_proxy_url` (default
+`https://ui.duckdb.org`) for testing, mirroring, or pointing at a fork.
 
 In bundled mode, `GET /config` is intercepted to inject the same
 `X-DuckDB-Version`, `X-DuckDB-Platform`, `X-DuckDB-UI-Extension-Version`
@@ -942,10 +946,10 @@ headers the upstream UI proxy adds. The bundled assets pin to a specific
 upstream UI commit hash, recorded in `UI_ASSETS_VERSION.txt` at the repo
 root.
 
-> **Runtime proxying to `ui.duckdb.org` is intentionally not in v0.1.**
-> It would require an HTTPS-capable cpp-httplib client, which would pull
-> OpenSSL into the build. Bundled mode covers the same surface without
-> the dependency. See §14 Roadmap.
+> **Implementation order:** PR-3 ships `proxy` (the simpler implementation
+> — just a thin HTTPS-client wrapper around cpp-httplib, against the
+> already-linked OpenSSL). `bundled` mode lands when an air-gapped
+> deployment use case actually appears.
 
 The flock login wrapper described in §7 lives at `GET /` (registered
 before the catch-all and before `/ui/`). The unmodified upstream UI
@@ -992,7 +996,8 @@ restored with `RESET GLOBAL`.
 | `flock_allow_admin_without_authz` | BOOLEAN | `false` | When the authz hook is the default permissive `flock_nop_authorization`, admin endpoints still default-deny unless this is set. Loud warning at startup if `true`. |
 | `flock_fetch_batch_chunks` | UBIGINT | `12` | Inherited from quack — chunks per FETCH. |
 | `flock_fetch_batch_bytes` | UBIGINT | `4194304` (4 MiB) | Inherited from quack. |
-| `flock_ui_assets` | VARCHAR | `bundled` | `bundled` / `disabled`. |
+| `flock_ui_assets` | VARCHAR | `proxy` | `proxy` / `bundled` / `disabled`. See §8. |
+| `flock_ui_proxy_url` | VARCHAR | `https://ui.duckdb.org` | Upstream URL when `flock_ui_assets = 'proxy'`. |
 | `flock_local_dev_mode` | BOOLEAN | `false` | Skip token requirement for local-bound, same-Origin requests. |
 | `flock_cors_origins` | VARCHAR | `''` (empty) | Comma-separated allow-list of origins for cross-origin `/sql`, `/quack`, `/auth/*`. |
 | `flock_log_requests` | BOOLEAN | `true` | Per-request structured log entry. |
@@ -1204,11 +1209,11 @@ CI runs all suites against each platform binary on every PR.
 
 Explicitly **out of scope for v0.1**, listed for record:
 
-- **UI asset proxy mode** (`flock_ui_assets='proxy'`) — runtime fetch
-  from `ui.duckdb.org` instead of serving from the bundled byte array.
-  Requires bringing OpenSSL into the build for the cpp-httplib HTTPS
-  client. Bundled mode covers the same surface today; proxy is on the
-  roadmap for deployments that want zero-rebuild UI updates.
+- **`bundled` UI assets mode** — opt-in for air-gapped / restricted-egress
+  deployments. v0.1 ships with `proxy` mode (default), which forwards
+  `GET /.*` to `ui.duckdb.org` over the OpenSSL-backed cpp-httplib
+  client. The bundled-asset infrastructure (`scripts/fetch-ui-assets.sh`,
+  embed step, version pin file) lands when a real use case appears.
 - **`flockd` wrapper binary** — a tiny C++ binary that hides the
   `duckdb -no-stdin -init …` invocation behind `flockd /data/db.duckdb`.
   Not shipped in v0.1: the unwrapped command is short, an init script is

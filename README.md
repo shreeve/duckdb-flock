@@ -105,9 +105,11 @@ Zero duplication, zero sync.
 
 Open `http://localhost:9494/` and you get the full DuckDB notebook:
 SQL notebooks, syntax highlighting, tab completion, query history, data
-exploration. The UI assets are bundled into the extension by default
-(no outbound network required) and `flock` implements the same
-`/ddb/*` binary protocol the upstream `duckdb-ui` extension uses.
+exploration. By default, `flock` proxies the UI assets from
+`ui.duckdb.org` (matching the upstream `duckdb-ui` extension behavior).
+For air-gapped or restricted-egress deployments, set
+`flock_ui_assets = 'bundled'` to serve a snapshot embedded in the
+extension. The `/ddb/*` binary protocol works the same in either mode.
 
 The first time you visit, flock asks for the token printed by
 `flock_serve` and issues an HTTP-only cookie. After that, the UI works
@@ -381,7 +383,8 @@ All settings are regular DuckDB session/global options.
 | `flock_session_ttl_s` | `3600` | Idle session TTL |
 | `flock_query_timeout_s` | `0` | Per-query timeout (0 disables) |
 | `flock_max_request_body_bytes` | `268435456` (256 MiB) | Per-request body cap |
-| `flock_ui_assets` | `bundled` | `bundled` / `disabled` |
+| `flock_ui_assets` | `proxy` | `proxy` / `bundled` / `disabled` |
+| `flock_ui_proxy_url` | `https://ui.duckdb.org` | Upstream URL when `flock_ui_assets = 'proxy'` |
 | `flock_cors_origins` | `''` | Allow-list for cross-origin browser requests |
 | `flock_log_requests` | `true` | Per-request structured log |
 | `flock_log_queries` | `false` | Log full SQL of every query |
