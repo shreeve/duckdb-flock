@@ -1,0 +1,30 @@
+# Main extension distribution pipeline.
+#
+# PR-1: scaffold only. Builds linux_amd64 via the reduced-CI matrix to
+# keep iteration fast while we vendor and rename quack. The full
+# osx_arm64 / osx_amd64 / linux_arm64 / windows_amd64 matrix lights up
+# in PR-2 (FlockHttpServer skeleton) or PR-3 (UI port) per the
+# AGENTS.md "Implementation roadmap".
+#
+# Adapted from duckdb-quack's MainDistributionPipeline.yml; same
+# structure, same pinned ci_tools_version, same calling convention.
+
+name: Main Extension Distribution Pipeline
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: true
+
+jobs:
+  duckdb-stable-build:
+    name: Build extension binaries
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    with:
+      duckdb_version: v1.5.2
+      ci_tools_version: v1.5-variegata
+      extension_name: flock
+      reduced_ci_mode: 'enabled'
