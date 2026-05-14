@@ -19,6 +19,19 @@ project(${TARGET_NAME})
 # explicitly; mirrors duckdb-ui's CMakeLists pattern.
 find_package(OpenSSL REQUIRED)
 
+# PR-3: vendored UI sources use DUCKDB_VERSION_AT_LEAST(M, m, p) /
+# DUCKDB_VERSION_AT_MOST(...) macros that depend on DUCKDB_MAJOR_VERSION /
+# DUCKDB_MINOR_VERSION / DUCKDB_PATCH_VERSION being defined as
+# preprocessor macros at compile time. Upstream duckdb-ui's CMakeLists
+# adds these via add_definitions; we mirror it. Without these, the
+# macros expand to (0 > N || ...) which is false → the wrong branches
+# of #if blocks in settings.cpp / watcher.cpp / http_server.cpp's
+# successor (ui_handlers.cpp) get taken and old-API references
+# fail to compile.
+add_definitions(-DDUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})
+add_definitions(-DDUCKDB_MINOR_VERSION=${DUCKDB_MINOR_VERSION})
+add_definitions(-DDUCKDB_PATCH_VERSION=${DUCKDB_PATCH_VERSION})
+
 include_directories(
     src/include
     src/quack/include

@@ -1,6 +1,7 @@
 #include "admin_handlers.hpp"
 
 #include "flock_http_server.hpp"
+#include "ui_handlers.hpp" // ui::UiHandlers::UiExtensionVersion
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/database.hpp"
@@ -86,15 +87,20 @@ void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 
 	// GET /info — public; empty body, version metadata in headers so
 	// the DuckDB UI can detect the server without running a query.
-	// SPEC §11 lists the headers; PR-3 will add X-DuckDB-UI-Extension-Version
-	// once UiHandlers lands so the official UI can detect us.
+	// SPEC §11 lists the headers. PR-3: added X-DuckDB-UI-Extension-Version
+	// so the official UI bundled at ui.duckdb.org sees us as a valid
+	// backend. Also added Access-Control-Allow-Origin: * to match
+	// upstream UI behavior (TODO PR-4: replace with cookie-aware
+	// flock_cors_origins allow-list).
 	http.Get("/info", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
 
+		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("X-Flock-Version", FlockVersion());
 		res.set_header("X-DuckDB-Version", DuckDB::LibraryVersion());
 		res.set_header("X-DuckDB-Platform", DuckDB::Platform());
 		res.set_header("X-Quack-Protocol-Version", kQuackProtocolVersion);
+		res.set_header("X-DuckDB-UI-Extension-Version", ui::UiHandlers::UiExtensionVersion());
 		res.status = 204;
 	});
 }

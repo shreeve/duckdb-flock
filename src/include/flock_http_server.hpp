@@ -54,10 +54,14 @@
 namespace duckdb {
 
 class DatabaseInstance;
+class ClientContext;
 class SessionManager;
 class AuthManager;
 class QuackHandlers;
 class AdminHandlers;
+namespace ui {
+class UiHandlers;
+}
 
 // FlockHttpServer owns the cpp-httplib Server, listener thread, and
 // per-server subsystems. Construction is ctor → Bind() →
@@ -89,11 +93,14 @@ public:
 	void Bind();
 
 	// Construct the built-in handler subsystems (QuackHandlers,
-	// AdminHandlers) and register their routes against the server. Must
-	// be called between Bind() and StartListening(). Concrete handler
-	// fields stored on `this` so route lambdas (which capture handler
-	// `this`) outlive request execution.
-	void RegisterBuiltinHandlers();
+	// AdminHandlers, UiHandlers) and register their routes against the
+	// server. Must be called between Bind() and StartListening().
+	// Concrete handler fields stored on `this` so route lambdas
+	// (which capture handler `this`) outlive request execution.
+	//
+	// PR-3+: takes a ClientContext for per-handler settings lookup
+	// (UiHandlers reads ui_remote_url, ui_polling_interval at construction).
+	void RegisterBuiltinHandlers(ClientContext &context);
 
 	// Spawn the listener thread (calls listen_after_bind on the bound
 	// socket). Returns immediately; the listener runs in the background.
@@ -107,13 +114,22 @@ public:
 	// Transitions LISTENING → CLOSING (or no-op in CLOSING/CLOSED).
 	void StopAccepting();
 
-	// StopAccepting() + drain in-flight request handlers (up to
-	// `flock_stop_drain_timeout_s`, default 30s) + join the listener
-	// thread. MUST NOT be called from a request-handler thread —
-	// joining the listener while holding a worker thread deadlocks
-	// through httplib's listen-loop teardown chain. Transitions any
-	// state → CLOSED.
+	// StopAccepting() + ShutdownHandlers() + drain in-flight request
+	// handlers + join listener thread. MUST NOT be called from a
+	// request-handler thread — joining the listener while holding a
+	// worker thread deadlocks through httplib's listen-loop teardown
+	// chain. Transitions any state → CLOSED.
 	void Close();
+
+	// Tell each handler subsystem to release resources that aren't
+	// request-scoped — long-running threads (UiHandlers' Watcher) and
+	// blocking SSE consumers (UiHandlers' EventDispatcher::Close()
+	// which wakes /localEvents WaitEvent calls). MUST be called BEFORE
+	// DrainActiveRequests, because those long-running threads aren't
+	// counted in active_requests; they'd block the drain forever
+	// otherwise. Idempotent. Called by Close() in the right order; no
+	// reason to call directly.
+	void ShutdownHandlers();
 
 	// Reference to the shared httplib server. Handler subsystems pass
 	// this to their Register() methods. Asserts state == BOUND
@@ -183,11 +199,12 @@ private:
 	unique_ptr<AuthManager> auth;
 
 	// Concrete handler ownership. Route lambdas registered against the
-	// httplib server capture `quack_handlers.get()` / `admin_handlers.get()`
-	// via `this`. These pointers stay valid until ~FlockHttpServer (which
-	// requires Close() to have drained workers first).
+	// httplib server capture `quack_handlers.get()` / `admin_handlers.get()` /
+	// `ui_handlers.get()` via `this`. These pointers stay valid until
+	// ~FlockHttpServer (which requires Close() to have drained workers first).
 	unique_ptr<QuackHandlers> quack_handlers;
 	unique_ptr<AdminHandlers> admin_handlers;
+	unique_ptr<ui::UiHandlers> ui_handlers;
 
 	// Listener-thread entry. Catches everything so an exception in the
 	// listener never escapes (which would call std::terminate and abort
@@ -215,7 +232,10 @@ public:
 	// Start the server. Throws InvalidInputException if a server is
 	// already running (single-server-per-process). Increments the
 	// generation counter and clears stop_requested for the new run.
-	void Start(weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
+	//
+	// PR-3+: takes a ClientContext for handler-construction settings
+	// lookup (UiHandlers reads ui_remote_url etc.).
+	void Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
 
 	// Stop the running server. Returns false if none was running on
 	// the given URI. Records stopped_generation == current generation

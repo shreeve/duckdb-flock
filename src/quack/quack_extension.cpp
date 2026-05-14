@@ -54,6 +54,11 @@
 // PR-2: flock-original lifecycle functions registered alongside quack_*.
 #include "flock_lifecycle.hpp"
 
+// PR-3: UI extension state + settings registration.
+#include "settings.hpp"     // UI_LOCAL_PORT_SETTING_NAME et al.
+#include "state.hpp"        // UIStorageExtensionInfo, STORAGE_EXTENSION_KEY = "ui"
+#include "utils/env.hpp"    // GetEnvOrDefault[Int]
+
 namespace duckdb {
 
 static constexpr const char *QUACK_SECRET_TYPE = "quack";
@@ -214,6 +219,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,
 	                           ext);
 
+	// PR-3: Register the UI StorageExtension under the "ui" key so
+	// UiHandlers can look up its per-tab connection pool via
+	// UIStorageExtensionInfo::GetState(*db). The storage_info IS
+	// stateful here (it holds the connections map); separate concept
+	// from quack's SessionManager. Bare StorageExtension (no attach
+	// callback) — the ATTACH path isn't relevant for UI; this is just
+	// state attached to a key.
+	auto ui_ext = duckdb::make_shared_ptr<StorageExtension>();
+	ui_ext->storage_info = duckdb::make_uniq<UIStorageExtensionInfo>();
+	StorageExtension::Register(loader.GetDatabaseInstance().config, STORAGE_EXTENSION_KEY, ui_ext);
+
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption("quack_authentication_function", "Name of a callback function for authentication",
 	                          LogicalType::VARCHAR, Value("quack_check_token"), nullptr, SetScope::GLOBAL);
@@ -222,6 +238,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
+
+	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
+	// existing duckdb-ui tooling/docs still apply. The local-port
+	// setting from upstream UI is intentionally NOT registered —
+	// flock_serve takes the URI which encodes the port; ui_local_port
+	// would be confusing dead state in flock.
+	{
+		auto def = GetEnvOrDefault(UI_REMOTE_URL_SETTING_NAME, UI_REMOTE_URL_SETTING_DEFAULT);
+		config.AddExtensionOption(UI_REMOTE_URL_SETTING_NAME,
+		                          "Remote URL the UI proxies GET /.* requests to (default ui.duckdb.org)",
+		                          LogicalType::VARCHAR, Value(def));
+	}
+	{
+		auto def = GetEnvOrDefaultInt(UI_POLLING_INTERVAL_SETTING_NAME, UI_POLLING_INTERVAL_SETTING_DEFAULT);
+		config.AddExtensionOption(UI_POLLING_INTERVAL_SETTING_NAME,
+		                          "UI catalog watcher polling interval in milliseconds (0 disables)",
+		                          LogicalType::UINTEGER, Value::UINTEGER(def));
+	}
 
 	// Process-wide fallback anchor for whoami().uptime when whoami_started_at isn't set.
 	// Stored as BIGINT epoch-microseconds to stay TZ-invariant regardless of ICU state.
