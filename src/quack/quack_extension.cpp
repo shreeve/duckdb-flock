@@ -1,7 +1,8 @@
-// PR-1 transitional fork — see AGENTS.md "Implementation roadmap".
+// PR-1 transitional fork — see AGENTS.md "Implementation roadmap"
+// and docs/upstream-quack-patches.md for the rebase process.
 //
 // This file is duckdb-quack's quack_extension.cpp at v1.5-variegata
-// (commit 90bd70e), with four minimal flock-specific edits:
+// (commit 90bd70e), with five minimal flock-specific edits:
 //
 //   1. The DUCKDB_CPP_EXTENSION_ENTRY symbol is renamed from `quack` to
 //      `flock` so DuckDB locates the right entry point when loading
@@ -16,6 +17,8 @@
 //      class identity matches the loadable extension name. The class
 //      is still spelled QuackExtension to keep the diff minimal; only
 //      its reported Name() changes.
+//   5. `loader.SetDescription(...)` text reflects flock's purpose
+//      (visible in `duckdb_extensions()` listing).
 //
 // Everything else — SQL function/setting names, wire format,
 // QuackServer's embedded httplib::Server — is preserved unchanged. The
