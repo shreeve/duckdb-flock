@@ -1,0 +1,184 @@
+[
+  {
+    "class": "MessageHeader",
+    "includes": [
+      "quack_message.hpp"
+    ],
+    "members":  [
+      {
+        "id": 1,
+        "name": "type",
+        "type": "MessageType"
+      },
+      {
+        "id": 2,
+        "name": "connection_id",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "client_query_id",
+        "type": "optional_idx"
+      }
+    ],
+    "pointer_type": "none",
+    "constructor": ["type", "connection_id"]
+  },
+  {
+    "class": "ErrorResponse",
+    "members": [
+      {
+        "id": 1,
+        "name": "message",
+        "type": "string",
+        "serialize_property": "error.RawMessage()"
+      }
+    ],
+    "constructor": ["message"]
+  },
+  {
+    "class": "PrepareRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "sql_query",
+        "type": "string"
+      }
+    ]
+  },
+  {
+    "class": "FetchRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "uuid",
+        "type": "hugeint_t"
+      }
+    ]
+  },
+  {
+    "class": "SuccessResponse",
+    "members": []
+  },
+  {
+    "class": "DisconnectMessage",
+    "members": []
+  },
+  {
+    "class": "PrepareResponseMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "result_types",
+        "type": "vector<LogicalType>"
+      },
+      {
+        "id": 2,
+        "name": "result_names",
+        "type": "vector<string>"
+      },
+      {
+        "id": 3,
+        "name": "needs_more_fetch",
+        "type": "bool"
+      },
+      {
+        "id": 4,
+        "name": "results",
+        "type": "vector<unique_ptr<DataChunkWrapper>>"
+      },
+      {
+        "id": 5,
+        "name": "result_uuid",
+        "type": "hugeint_t"
+      }
+    ],
+    "constructor": ["result_types", "result_names",  "results", "needs_more_fetch", "result_uuid"]
+  },
+  {
+    "class": "AppendRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "schema_name",
+        "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "table_name",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "append_chunk",
+        "type": "unique_ptr<DataChunkWrapper>"
+      }
+    ]
+  },
+  {
+    "class": "FetchResponseMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "results",
+        "type": "vector<unique_ptr<DataChunkWrapper>>"
+      },
+      {
+        "id": 2,
+        "name": "batch_index",
+        "type": "optional_idx"
+      }
+    ]
+  },
+  {
+    "class": "ConnectionRequestMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "auth_string",
+        "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "client_duckdb_version",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "client_platform",
+        "type": "string"
+      },
+      {
+        "id": 4,
+        "name": "min_supported_quack_version",
+        "type": "idx_t"
+      },
+      {
+        "id": 5,
+        "name": "max_supported_quack_version",
+        "type": "idx_t"
+      }
+    ]
+  },
+  {
+    "class": "ConnectionResponseMessage",
+    "members": [
+      {
+        "id": 1,
+        "name": "server_duckdb_version",
+        "type": "string"
+      },
+      {
+        "id": 2,
+        "name": "server_platform",
+        "type": "string"
+      },
+      {
+        "id": 3,
+        "name": "quack_version",
+        "type": "idx_t"
+      }
+    ]
+  }
+]
+
