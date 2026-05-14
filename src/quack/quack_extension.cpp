@@ -1,7 +1,7 @@
 // PR-1 transitional fork — see AGENTS.md "Implementation roadmap".
 //
 // This file is duckdb-quack's quack_extension.cpp at v1.5-variegata
-// (commit 90bd70e), with three minimal flock-specific edits:
+// (commit 90bd70e), with four minimal flock-specific edits:
 //
 //   1. The DUCKDB_CPP_EXTENSION_ENTRY symbol is renamed from `quack` to
 //      `flock` so DuckDB locates the right entry point when loading
@@ -12,11 +12,15 @@
 //   3. A new `flock_version()` scalar function is registered alongside
 //      the upstream `quack_*` SQL surface, so a smoke test can verify
 //      the extension loaded and exports flock-named identifiers.
+//   4. `QuackExtension::Name()` returns "flock" so the C++ Extension
+//      class identity matches the loadable extension name. The class
+//      is still spelled QuackExtension to keep the diff minimal; only
+//      its reported Name() changes.
 //
-// Everything else — class name, SQL function/setting names, wire format
-// — is preserved unchanged. The architectural refactor that extracts
-// httplib::Server from QuackServer into a shared FlockHttpServer lands
-// in PR-2.
+// Everything else — SQL function/setting names, wire format,
+// QuackServer's embedded httplib::Server — is preserved unchanged. The
+// architectural refactor that extracts httplib::Server from QuackServer
+// into a shared FlockHttpServer lands in PR-2.
 
 #define DUCKDB_EXTENSION_MAIN
 
@@ -105,12 +109,16 @@ static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Ve
 // flock-specific: returns the build's extension version string. Lets a
 // smoke test confirm the extension loaded and that flock-named symbols
 // are reachable, without depending on any upstream quack surface.
+//
+// Implemented as a constant-vector reference so the result is correct
+// regardless of cardinality (e.g. `SELECT flock_version() FROM range(10)`).
 static void FlockVersionScalar(const DataChunk &, ExpressionState &, Vector &result) {
 #ifdef EXT_VERSION_FLOCK
-	result.SetValue(0, Value(EXT_VERSION_FLOCK));
+	Value version(EXT_VERSION_FLOCK);
 #else
-	result.SetValue(0, Value("unknown"));
+	Value version("unknown");
 #endif
+	result.Reference(version);
 }
 
 static void QuackIdentifyFun(ClientContext &, TableFunctionInput &, DataChunk &) {
@@ -145,8 +153,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("flock — DuckDB as an HTTP service (PR-1: vendored Quack RPC)");
 
 	// flock-specific: SELECT flock_version() as the smoke-test surface.
+	// Not volatile — the build's version string is deterministic for the
+	// lifetime of the process.
 	ScalarFunction flock_version_fun("flock_version", {}, LogicalType::VARCHAR, FlockVersionScalar);
-	flock_version_fun.SetVolatile();
 	loader.RegisterFunction(flock_version_fun);
 
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
@@ -245,7 +254,12 @@ void QuackExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 std::string QuackExtension::Name() {
-	return "quack";
+	// flock-specific: the C++ Extension class identity must match the
+	// loadable extension name so DuckDB's introspection / static-registry
+	// bookkeeping doesn't see a mismatch. The class is still spelled
+	// QuackExtension because PR-1 minimizes diff against upstream; only
+	// the reported name changes.
+	return "flock";
 }
 
 std::string QuackExtension::Version() const {

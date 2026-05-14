@@ -4,20 +4,23 @@
 
 require flock
 
-# The extension binary builds, loads, and the flock-named SQL surface is
-# reachable. The actual semantics live in PR-2+.
+statement ok
+LOAD flock;
+
+# The flock-named SQL surface is reachable. PR-1 promises only the
+# existence of these identifiers; semantics live in PR-2+.
 query I
-SELECT flock_version() IS NOT NULL;
+SELECT CASE WHEN flock_version() IS NOT NULL THEN 1 ELSE 0 END;
 ----
-true
+1
 
 # The flock_version() return is non-empty (CMake should set
 # EXT_VERSION_FLOCK at build time; the fallback "unknown" is also
 # acceptable for source builds without git tags).
 query I
-SELECT length(flock_version()) > 0;
+SELECT CASE WHEN length(flock_version()) > 0 THEN 1 ELSE 0 END;
 ----
-true
+1
 
 # The vendored quack SQL surface is intact. PR-1 promises only that
 # these names exist, not that all semantics are exercised here — that
