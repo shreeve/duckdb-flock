@@ -51,6 +51,9 @@
 #include "include/quack_storage.hpp"
 #include "include/quack_uri.hpp"
 
+// PR-2: flock-original lifecycle functions registered alongside quack_*.
+#include "flock_lifecycle.hpp"
+
 namespace duckdb {
 
 static constexpr const char *QUACK_SECRET_TYPE = "quack";
@@ -153,7 +156,7 @@ static TableFunction GetQuackIdentifyFunction() {
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	loader.SetDescription("flock — DuckDB as an HTTP service (PR-1: vendored Quack RPC)");
+	loader.SetDescription("flock — DuckDB as an HTTP service (PR-2: FlockHttpServer)");
 
 	// flock-specific: SELECT flock_version() as the smoke-test surface.
 	// Not volatile — the build's version string is deterministic for the
@@ -161,6 +164,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ScalarFunction flock_version_fun("flock_version", {}, LogicalType::VARCHAR, FlockVersionScalar);
 	loader.RegisterFunction(flock_version_fun);
 
+	// Vendored quack table functions. quack_serve / quack_stop are now
+	// thin shims that delegate to FlockServerState::Global() (see
+	// src/quack/quack_start_stop.cpp).
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
 	loader.RegisterFunction(QuackServeFunction::GetFunction());
@@ -168,6 +174,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackServerListFunction::GetFunction());
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
+
+	// flock-named lifecycle functions per SPEC §9. Same underlying
+	// FlockServerState as quack_serve/stop above, but a different SQL
+	// surface — flock_serve uses "flock:" defaults, flock_wait blocks
+	// for daemon-mode init scripts (no quack_wait alias because
+	// upstream never had one).
+	loader.RegisterFunction(FlockServeFunction::GetFunction());
+	loader.RegisterFunction(FlockStopFunction::GetFunction());
+	loader.RegisterFunction(FlockWaitFunction::GetFunction());
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",
@@ -189,7 +204,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.GetDatabaseInstance().GetLogManager().RegisterLogType(make_uniq<QuackLogType>());
 
-	// (ab)use storage extension info to store our state
+	// Register the QuackStorageExtension under the "quack" key so
+	// `ATTACH 'quack:host'` works for stock-quack clients. PR-2: the
+	// storage_info no longer carries state (server lifecycle moved to
+	// FlockServerState::Global()), but the registration shape is
+	// unchanged for compatibility.
 	auto ext = duckdb::make_shared_ptr<QuackStorageExtension>();
 	ext->storage_info = duckdb::make_uniq<QuackStorageExtensionInfo>();
 	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,

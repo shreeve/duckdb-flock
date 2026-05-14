@@ -1,12 +1,25 @@
 #pragma once
 
+// PR-2 refactor of upstream duckdb-quack's quack_storage.hpp.
+//
+// Upstream's QuackStorageExtensionInfo carried the multi-server map
+// (`unordered_map<string, unique_ptr<QuackServer>>`) plus the
+// CreateServer / StopServer / ListServers methods. flock is
+// single-server-per-process per SPEC §2 — that state lives in
+// FlockServerState::Global() (in src/include/flock_http_server.hpp).
+//
+// What stays here:
+//   - QuackStorageExtension: the StorageExtension subclass that wires
+//     up the ATTACH 'quack:host' callback and transaction manager.
+//     Stock-quack clients reach this via StorageExtension::Find("quack").
+//   - QuackStorageExtensionInfo: kept as an empty StorageExtensionInfo
+//     subclass so the existing registration pattern in quack_extension.cpp
+//     stays mechanically identical. No data members; no server map.
+//     The STORAGE_EXTENSION_KEY constant stays "quack" for ATTACH compat.
+
 #include "duckdb/storage/storage_extension.hpp"
 
-#include "quack_server.hpp"
-
 namespace duckdb {
-
-class DatabaseInstance;
 
 class QuackStorageExtension : public StorageExtension {
 public:
@@ -15,25 +28,11 @@ public:
 
 class QuackStorageExtensionInfo : public StorageExtensionInfo {
 public:
-	static QuackStorageExtensionInfo &GetState(const DatabaseInstance &instance);
-
-	QuackServer &CreateServer(ClientContext &context, const QuackUri &listen_uri, const string &token);
-	bool StopServer(ClientContext &context, const QuackUri &listen_uri);
-
-	struct ServerSnapshot {
-		string listen_uri;
-		string listen_url;
-		string host;
-		uint16_t port;
-		idx_t active_connections;
-		vector<std::pair<string, string>> info;
-	};
-	vector<ServerSnapshot> ListServers();
-
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
-
-private:
-	std::mutex servers_mutex;
-	unordered_map<string, unique_ptr<QuackServer>> servers;
+	// PR-2: the upstream multi-server CreateServer / StopServer / ListServers
+	// API is gone. Use FlockServerState::Global().Start() / .Stop() /
+	// .WithCurrent() / .IsRunning() instead. See SPEC §2 single-server-
+	// per-process.
 };
+
 } // namespace duckdb
