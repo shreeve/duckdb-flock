@@ -13,6 +13,7 @@
 
 #include "flock_auth.hpp"
 #include "flock_http_server.hpp"
+#include "flock_session.hpp" // SessionManager full definition for ActiveCount() in QuackServerList
 #include "quack_startstop.hpp"
 
 using namespace duckdb;
