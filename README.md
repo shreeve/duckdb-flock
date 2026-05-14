@@ -16,14 +16,22 @@ session pool and auth model.
 >
 > **Implementation status:** This README describes the v0.1 *target*.
 > The repo is being implemented in staged PRs (see [`AGENTS.md`](./AGENTS.md)
-> "Implementation roadmap"). PR-1 vendors `duckdb-quack` source verbatim
-> as `src/quack/` and renames the build identifier to `flock` — `/quack`
-> works against stock quack clients on day one, but the SQL surface is
-> still `quack_serve`/`quack_stop`/etc. (plus a new `flock_version()`).
-> The `flock_serve`/`flock_wait` lifecycle, `FlockHttpServer`, `/health`,
-> `/info`, `/sql`, the bundled DuckDB UI, admin endpoints, and the
-> auth-cookie flow all land in subsequent PRs. Examples below describe
-> the eventual API; what works *today* depends on which PR has merged.
+> "Implementation roadmap"). What works as of `main` today: PR-1
+> vendored `duckdb-quack` and built it as `flock.duckdb_extension`;
+> PR-1.5 added a `/quack` runtime roundtrip test; PR-2 extracted the
+> shared `FlockHttpServer` + `flock_serve` / `flock_stop` / `flock_wait`
+> lifecycle + `/health` and `/info`; PR-3 vendored `duckdb-ui` and wired
+> `UiHandlers` against the shared server (`/ddb/*`, `/localEvents`,
+> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`).
+>
+> **UI is local-dev-only until PR-4.** The `/ddb/*` routes use upstream
+> UI's same-Origin check (allowed Origins = loopback + bind host),
+> NOT the SPEC §7 flock cookie-auth flow. Don't expose the server on
+> a public bind address until PR-4 ships the cookie HMAC + login
+> wrapper.
+>
+> Still pending: the `/sql` JSON endpoint (PR-5), admin handlers
+> (PR-6). Examples below describe the eventual API.
 
 ## Quick Start
 

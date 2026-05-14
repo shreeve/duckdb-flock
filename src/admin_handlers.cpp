@@ -1,6 +1,7 @@
 #include "admin_handlers.hpp"
 
 #include "flock_http_server.hpp"
+#include "ui_handlers.hpp" // ui::UiHandlers::UiExtensionVersion
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/database.hpp"
@@ -66,14 +67,14 @@ string EscapeJsonString(const string &s) {
 AdminHandlers::AdminHandlers(FlockHttpServer &server_p) : server(server_p) {
 }
 
-void AdminHandlers::Register(duckdb_httplib::Server &http) {
+void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	auto *self = this;
 
 	// GET /health — public, four fields exactly per SPEC §5.5.
 	// No DB info, no path, no token, no extension list, no bind
 	// address, no auth principal — anything else risks information
 	// disclosure on a remote-bound deploy.
-	http.Get("/health", [self](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	http.Get("/health", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
 
 		auto uptime_s = std::chrono::duration_cast<std::chrono::seconds>(
@@ -86,15 +87,20 @@ void AdminHandlers::Register(duckdb_httplib::Server &http) {
 
 	// GET /info — public; empty body, version metadata in headers so
 	// the DuckDB UI can detect the server without running a query.
-	// SPEC §11 lists the headers; PR-2 sets the four that don't
-	// require UI/sql machinery.
-	http.Get("/info", [self](const duckdb_httplib::Request &, duckdb_httplib::Response &res) {
+	// SPEC §11 lists the headers. PR-3: added X-DuckDB-UI-Extension-Version
+	// so the official UI bundled at ui.duckdb.org sees us as a valid
+	// backend. Also added Access-Control-Allow-Origin: * to match
+	// upstream UI behavior (TODO PR-4: replace with cookie-aware
+	// flock_cors_origins allow-list).
+	http.Get("/info", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
 
+		res.set_header("Access-Control-Allow-Origin", "*");
 		res.set_header("X-Flock-Version", FlockVersion());
 		res.set_header("X-DuckDB-Version", DuckDB::LibraryVersion());
 		res.set_header("X-DuckDB-Platform", DuckDB::Platform());
 		res.set_header("X-Quack-Protocol-Version", kQuackProtocolVersion);
+		res.set_header("X-DuckDB-UI-Extension-Version", ui::UiHandlers::UiExtensionVersion());
 		res.status = 204;
 	});
 }

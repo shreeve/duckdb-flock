@@ -83,7 +83,7 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 	// PR-2: was QuackStorageExtensionInfo::GetState(*context.db).CreateServer(...).
 	// Now delegates to the process-global FlockServerState. Single-server-per-process
 	// per SPEC §2 — a second quack_serve while one is running throws.
-	FlockServerState::Global().Start(context.db, bind_data.listen_uri, bind_data.token);
+	FlockServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());

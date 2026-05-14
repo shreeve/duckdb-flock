@@ -37,15 +37,31 @@
 #include "duckdb/common/string.hpp"
 
 #include "quack_uri.hpp"
+
+// PR-3: migrate from duckdb_httplib (plain) to duckdb_httplib_openssl
+// (the OpenSSL-enabled cpp-httplib build) so UI handlers — whose
+// upstream code uses the openssl namespace — can register routes
+// against our shared server. The two namespaces produce separate C++
+// types (not interchangeable); the openssl variant has the same API
+// surface as plain plus HTTPS support. PR-2's "single httplib::Server
+// owner" invariant still holds — we just own the openssl variant
+// instead. The CI grep guard at .github/workflows/architecture-guard.yml
+// now matches both `duckdb_httplib::Server` and
+// `duckdb_httplib_openssl::Server`.
+#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 namespace duckdb {
 
 class DatabaseInstance;
+class ClientContext;
 class SessionManager;
 class AuthManager;
 class QuackHandlers;
 class AdminHandlers;
+namespace ui {
+class UiHandlers;
+}
 
 // FlockHttpServer owns the cpp-httplib Server, listener thread, and
 // per-server subsystems. Construction is ctor → Bind() →
@@ -77,11 +93,14 @@ public:
 	void Bind();
 
 	// Construct the built-in handler subsystems (QuackHandlers,
-	// AdminHandlers) and register their routes against the server. Must
-	// be called between Bind() and StartListening(). Concrete handler
-	// fields stored on `this` so route lambdas (which capture handler
-	// `this`) outlive request execution.
-	void RegisterBuiltinHandlers();
+	// AdminHandlers, UiHandlers) and register their routes against the
+	// server. Must be called between Bind() and StartListening().
+	// Concrete handler fields stored on `this` so route lambdas
+	// (which capture handler `this`) outlive request execution.
+	//
+	// PR-3+: takes a ClientContext for per-handler settings lookup
+	// (UiHandlers reads ui_remote_url, ui_polling_interval at construction).
+	void RegisterBuiltinHandlers(ClientContext &context);
 
 	// Spawn the listener thread (calls listen_after_bind on the bound
 	// socket). Returns immediately; the listener runs in the background.
@@ -95,19 +114,28 @@ public:
 	// Transitions LISTENING → CLOSING (or no-op in CLOSING/CLOSED).
 	void StopAccepting();
 
-	// StopAccepting() + drain in-flight request handlers (up to
-	// `flock_stop_drain_timeout_s`, default 30s) + join the listener
-	// thread. MUST NOT be called from a request-handler thread —
-	// joining the listener while holding a worker thread deadlocks
-	// through httplib's listen-loop teardown chain. Transitions any
-	// state → CLOSED.
+	// StopAccepting() + ShutdownHandlers() + drain in-flight request
+	// handlers + join listener thread. MUST NOT be called from a
+	// request-handler thread — joining the listener while holding a
+	// worker thread deadlocks through httplib's listen-loop teardown
+	// chain. Transitions any state → CLOSED.
 	void Close();
+
+	// Tell each handler subsystem to release resources that aren't
+	// request-scoped — long-running threads (UiHandlers' Watcher) and
+	// blocking SSE consumers (UiHandlers' EventDispatcher::Close()
+	// which wakes /localEvents WaitEvent calls). MUST be called BEFORE
+	// DrainActiveRequests, because those long-running threads aren't
+	// counted in active_requests; they'd block the drain forever
+	// otherwise. Idempotent. Called by Close() in the right order; no
+	// reason to call directly.
+	void ShutdownHandlers();
 
 	// Reference to the shared httplib server. Handler subsystems pass
 	// this to their Register() methods. Asserts state == BOUND
 	// (registering a route while the listener is running is undefined
 	// per cpp-httplib).
-	duckdb_httplib::Server &Server();
+	duckdb_httplib_openssl::Server &Server();
 
 	// Accessors. Safe to call concurrently with the listener thread;
 	// these read immutable state set in the ctor or Bind().
@@ -160,7 +188,7 @@ private:
 	std::mutex state_mu;
 	State state = State::CONSTRUCTED;
 
-	unique_ptr<duckdb_httplib::Server> server;
+	unique_ptr<duckdb_httplib_openssl::Server> server;
 	std::thread listen_thread; // .joinable() == false until StartListening()
 
 	std::atomic<idx_t> active_requests {0};
@@ -171,11 +199,12 @@ private:
 	unique_ptr<AuthManager> auth;
 
 	// Concrete handler ownership. Route lambdas registered against the
-	// httplib server capture `quack_handlers.get()` / `admin_handlers.get()`
-	// via `this`. These pointers stay valid until ~FlockHttpServer (which
-	// requires Close() to have drained workers first).
+	// httplib server capture `quack_handlers.get()` / `admin_handlers.get()` /
+	// `ui_handlers.get()` via `this`. These pointers stay valid until
+	// ~FlockHttpServer (which requires Close() to have drained workers first).
 	unique_ptr<QuackHandlers> quack_handlers;
 	unique_ptr<AdminHandlers> admin_handlers;
+	unique_ptr<ui::UiHandlers> ui_handlers;
 
 	// Listener-thread entry. Catches everything so an exception in the
 	// listener never escapes (which would call std::terminate and abort
@@ -203,7 +232,10 @@ public:
 	// Start the server. Throws InvalidInputException if a server is
 	// already running (single-server-per-process). Increments the
 	// generation counter and clears stop_requested for the new run.
-	void Start(weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
+	//
+	// PR-3+: takes a ClientContext for handler-construction settings
+	// lookup (UiHandlers reads ui_remote_url etc.).
+	void Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
 
 	// Stop the running server. Returns false if none was running on
 	// the given URI. Records stopped_generation == current generation

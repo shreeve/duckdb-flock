@@ -79,7 +79,7 @@ void FlockServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 		return;
 	}
 
-	FlockServerState::Global().Start(context.db, bind_data.listen_uri, bind_data.token);
+	FlockServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());

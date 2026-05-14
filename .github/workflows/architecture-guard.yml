@@ -34,24 +34,29 @@ jobs:
         with:
           submodules: false
 
-      - name: grep for stray duckdb_httplib::Server owners
+      - name: grep for stray httplib::Server owners (both namespaces)
         run: |
           set -e
-          echo "Checking that duckdb_httplib::Server is owned only by flock_http_server.{cpp,hpp}..."
-          # Match construction (make_uniq) and ownership (unique_ptr/shared_ptr).
-          # The allow-list excludes flock_http_server.{cpp,hpp} (the canonical owner).
-          PATTERN='(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib::Server\s*>'
+          echo "Checking that httplib::Server is owned only by flock_http_server.{cpp,hpp}..."
+          # PR-3 migration: FlockHttpServer's underlying type changed
+          # from duckdb_httplib::Server (plain) to duckdb_httplib_openssl::Server
+          # (OpenSSL-enabled). The single-owner invariant from PR-2's
+          # acceptance checklist still holds — this guard now matches
+          # ownership patterns for BOTH namespaces, so accidental
+          # reintroduction of either variant in a non-FlockHttpServer file
+          # gets caught.
+          PATTERN='(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib(_openssl)?::Server\s*>'
           if grep -REn --include='*.cpp' --include='*.hpp' "$PATTERN" src \
                | grep -v "src/include/flock_http_server.hpp" \
                | grep -v "src/flock_http_server.cpp"; then
             echo ""
-            echo "ERROR: duckdb_httplib::Server is constructed or owned outside"
-            echo "src/flock_http_server.{cpp,hpp}. Per AGENTS.md PR-2 acceptance"
-            echo "checklist, FlockHttpServer is the only owner."
+            echo "ERROR: httplib::Server (plain or _openssl) is constructed or"
+            echo "owned outside src/flock_http_server.{cpp,hpp}. Per AGENTS.md"
+            echo "PR-2 acceptance checklist, FlockHttpServer is the only owner."
             echo ""
             echo "If this is intentional, update the allow-list in"
             echo ".github/workflows/architecture-guard.yml AND document the change"
             echo "in AGENTS.md (Implementation roadmap section)."
             exit 1
           fi
-          echo "OK: duckdb_httplib::Server ownership is clean."
+          echo "OK: httplib::Server ownership is clean."

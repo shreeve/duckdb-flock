@@ -3,11 +3,13 @@
 #include "admin_handlers.hpp"
 #include "flock_auth.hpp"
 #include "flock_session.hpp"
-#include "quack_server.hpp" // QuackHandlers
+#include "quack_server.hpp"  // QuackHandlers
+#include "ui_handlers.hpp"   // ui::UiHandlers
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
@@ -90,13 +92,13 @@ void FlockHttpServer::Bind() {
 		throw InvalidInputException("FlockHttpServer::Bind called in wrong state");
 	}
 
-	server = make_uniq<duckdb_httplib::Server>();
+	server = make_uniq<duckdb_httplib_openssl::Server>();
 
 	// Each keep-alive connection holds a server thread for its lifetime;
 	// we need enough threads to handle all concurrent keep-alive
 	// connections (catalog clients + scan-thread clients) without
 	// deadlock.
-	server->new_task_queue = [] { return new duckdb_httplib::ThreadPool(kHttplibWorkers); };
+	server->new_task_queue = [] { return new duckdb_httplib_openssl::ThreadPool(kHttplibWorkers); };
 	server->set_keep_alive_max_count(kHttplibKeepAliveCount);
 	server->set_keep_alive_timeout(kHttplibKeepAliveTimeoutSec);
 	server->set_tcp_nodelay(true);
@@ -115,7 +117,7 @@ void FlockHttpServer::Bind() {
 	state = State::BOUND;
 }
 
-duckdb_httplib::Server &FlockHttpServer::Server() {
+duckdb_httplib_openssl::Server &FlockHttpServer::Server() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (state != State::BOUND) {
 		throw InvalidInputException("FlockHttpServer::Server() called outside the BOUND state — "
@@ -124,13 +126,17 @@ duckdb_httplib::Server &FlockHttpServer::Server() {
 	return *server;
 }
 
-void FlockHttpServer::RegisterBuiltinHandlers() {
+void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	{
 		std::lock_guard<std::mutex> lock(state_mu);
 		if (state != State::BOUND) {
 			throw InvalidInputException("FlockHttpServer::RegisterBuiltinHandlers called in wrong state");
 		}
 	}
+
+	// Order matters: cpp-httplib resolves routes in registration order.
+	// UiHandlers' GET /.* catch-all MUST be registered LAST or it shadows
+	// /quack, /health, /info, etc.
 
 	// QuackHandlers: /quack, OPTIONS /quack
 	quack_handlers = make_uniq<QuackHandlers>(*this, *sessions, *auth, db);
@@ -139,6 +145,14 @@ void FlockHttpServer::RegisterBuiltinHandlers() {
 	// AdminHandlers: /health, /info
 	admin_handlers = make_uniq<AdminHandlers>(*this);
 	admin_handlers->Register(*server);
+
+	// UiHandlers: /localEvents (SSE), /localToken, /ddb/interrupt,
+	// /ddb/run, /ddb/tokenize, GET /.* (catch-all proxy to ui.duckdb.org).
+	// Registered LAST so the catch-all doesn't shadow earlier routes.
+	// Construction also starts the catalog Watcher thread (stopped in
+	// Shutdown() during Close()).
+	ui_handlers = make_uniq<ui::UiHandlers>(*this, db, context);
+	ui_handlers->Register(*server);
 }
 
 void FlockHttpServer::ListenThreadMain(FlockHttpServer *srv) {
@@ -187,8 +201,39 @@ bool FlockHttpServer::DrainActiveRequests(std::chrono::seconds timeout) {
 	});
 }
 
+void FlockHttpServer::ShutdownHandlers() {
+	// Tell handlers to release non-request-scoped resources (threads,
+	// blocking SSE waits, etc.) so the upcoming drain can actually
+	// reach active_requests == 0. Without this, UiHandlers' Watcher
+	// thread keeps polling and /localEvents WaitEvent blocks
+	// forever — the drain never completes.
+	//
+	// Order matters: Watcher Stop() first (so no more events are
+	// produced), then dispatcher Close() (so any in-flight WaitEvent
+	// returns). UiHandlers::Shutdown() handles both internally.
+	//
+	// PR-3+ (per GPT-5.5 round 9 catch). PR-2 didn't need this because
+	// quack handlers had no long-running threads — every action was
+	// request-scoped and counted by ActiveRequestGuard.
+	if (ui_handlers) {
+		// Stops the Watcher thread + closes the EventDispatcher (wakes
+		// any /localEvents WaitEvent calls). Without this, the drain
+		// would block forever on the SSE consumers + the Watcher
+		// holds a Connection that can keep the DB alive.
+		ui_handlers->Shutdown();
+	}
+	if (admin_handlers) {
+		// No long-running state today.
+	}
+	if (quack_handlers) {
+		// No long-running state — every operation runs inside a
+		// request handler counted by ActiveRequestGuard.
+	}
+}
+
 void FlockHttpServer::Close() {
 	StopAccepting();
+	ShutdownHandlers();
 
 	// Drain in-flight handlers. Per GPT-5.5 round 8 catch #2, we MUST
 	// NOT destroy handlers while active_requests > 0 — route lambdas
@@ -223,6 +268,7 @@ void FlockHttpServer::Close() {
 	// captures (which borrow `this` and the subsystems) don't outlive
 	// what they reference. We've drained to zero above, so no in-flight
 	// callback should be touching them.
+	ui_handlers.reset();
 	admin_handlers.reset();
 	quack_handlers.reset();
 	server.reset();
@@ -247,7 +293,7 @@ FlockServerState &FlockServerState::Global() {
 	return instance;
 }
 
-void FlockServerState::Start(weak_ptr<DatabaseInstance> db, QuackUri uri, string token) {
+void FlockServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token) {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (server) {
 		throw InvalidInputException("flock server is already running on %s — flock is single-server-per-process; "
@@ -255,10 +301,10 @@ void FlockServerState::Start(weak_ptr<DatabaseInstance> db, QuackUri uri, string
 		                            server->ListenUri().Uri());
 	}
 
-	// Sequence: ctor → Bind() → RegisterBuiltinHandlers() → StartListening()
+	// Sequence: ctor → Bind() → RegisterBuiltinHandlers(context) → StartListening()
 	auto srv = make_uniq<FlockHttpServer>(std::move(db), std::move(uri), std::move(token));
 	srv->Bind();
-	srv->RegisterBuiltinHandlers();
+	srv->RegisterBuiltinHandlers(context);
 	srv->StartListening();
 
 	server = std::move(srv);
