@@ -306,8 +306,8 @@ password.
 - **Public routes:** `GET /health`, `GET /ready`, `GET /info`, `GET /.*` (UI assets), and `OPTIONS /quack` (CORS preflight). Everything else requires authentication.
 - **Browser-origin requests do NOT bypass token auth.** The `Origin` check is CSRF defence; the auth cookie (issued by `POST /auth/login`) carries identity.
 - **`/localToken`** (used to bridge MotherDuck auth into the local UI) is automatically disabled when bound to a non-loopback address.
-- **For network exposure**, front flock with nginx or Caddy doing TLS termination — recipe in [`docs/REVERSE_PROXY.md`](./docs/REVERSE_PROXY.md).
-- **CORS** is blocked by default. Allow specific origins via `flock_cors_origins`.
+- **For network exposure**, front flock with nginx or Caddy doing TLS termination — recipe in [`docs/REVERSE_PROXY.md`](./docs/REVERSE_PROXY.md). Your reverse proxy **must** forward `X-Forwarded-Proto: https` (or the browser's request must have `Origin: https://…`) so flock sets the `Secure` attribute on issued `flock_session` cookies. Without that header, cookies are issued without `Secure`, which is acceptable on plain-HTTP loopback dev but unsafe over a public HTTPS deployment. nginx default config (`proxy_set_header X-Forwarded-Proto $scheme;`) does the right thing.
+- **CORS** is blocked by default. Allow specific origins via `flock_cors_origins`. The setting accepts a comma-separated list of `scheme://host[:port]` entries (no path, no query, no fragment, no trailing slash); `flock_serve` refuses to start if it sees `'*'` or a malformed entry.
 
 Authentication and authorization are **two pluggable SQL functions**:
 

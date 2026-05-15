@@ -193,11 +193,31 @@ uint64_t AuthHandlers::CookieTtlSec() {
 }
 
 bool AuthHandlers::RequestIsBehindHttps(const duckdb_httplib_openssl::Request &req) {
+	// Two signals (per round-12 review) so an operator misconfigured
+	// reverse proxy that strips X-Forwarded-Proto still gets Secure
+	// cookies if the browser believes the page is HTTPS:
+	//
+	//   1. X-Forwarded-Proto: https (preferred — explicit proxy contract)
+	//   2. Origin: https://...      (fallback — the browser-asserted scheme)
+	//
+	// Either signal flips Secure on. Belt-and-suspenders: it's safer
+	// to over-set Secure than to omit it. (A Secure cookie sent to an
+	// HTTP-only origin is simply not sent back by the browser; no
+	// breakage, the user just re-logs-in.)
+	//
+	// We deliberately do NOT use either signal for AUTHORIZATION
+	// decisions — that path stays gated on the actual auth credential.
+	// X-Forwarded-Proto is forgeable; Origin is too in non-browser
+	// contexts. Secure is a UI-side hint, not an authz bit.
 	auto xfp = req.get_header_value("X-Forwarded-Proto");
-	if (xfp.empty()) {
-		return false;
+	if (!xfp.empty() && StringUtil::Lower(xfp) == "https") {
+		return true;
 	}
-	return StringUtil::Lower(xfp) == "https";
+	auto origin = req.get_header_value("Origin");
+	if (!origin.empty() && origin.compare(0, 8, "https://") == 0) {
+		return true;
+	}
+	return false;
 }
 
 void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
@@ -340,6 +360,22 @@ void AuthHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	                                  duckdb_httplib_openssl::Response &res) {
 		self->HandleLogout(req, res);
 	});
+
+	// Defensive 405 on GET /auth/{login,logout} — without these, a
+	// browser GET would fall through to the UI catch-all, which would
+	// 401 (path != "/"). 405 is the more honest answer ("method not
+	// allowed on a route that exists") and matches what curl tooling
+	// expects. Per round-12 review: don't let route-order semantics
+	// be the source of correctness.
+	auto method_not_allowed = [self](const duckdb_httplib_openssl::Request &req,
+	                                  duckdb_httplib_openssl::Response &res) {
+		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		res.set_header("Allow", "POST, OPTIONS");
+		WriteJsonError(res, 405, "METHOD_NOT_ALLOWED",
+		               StringUtil::Format("only POST is allowed on %s", req.path));
+	};
+	http.Get("/auth/login", method_not_allowed);
+	http.Get("/auth/logout", method_not_allowed);
 
 	http.Options("/auth/login", [self](const duckdb_httplib_openssl::Request &req,
 	                                    duckdb_httplib_openssl::Response &res) {

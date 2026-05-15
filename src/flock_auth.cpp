@@ -300,7 +300,10 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 		result.error_code = "BAD_COOKIE_PAYLOAD";
 		return result;
 	}
-	if (NowUnix() > expires_unix) {
+	// Expire-at-or-after the recorded timestamp (inclusive expiry,
+	// matching RFC 6265-ish convention). A cookie issued with
+	// expires_unix == now is already expired the moment it's verified.
+	if (NowUnix() >= expires_unix) {
 		result.error_code = "COOKIE_EXPIRED";
 		return result;
 	}

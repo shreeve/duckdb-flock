@@ -157,6 +157,14 @@ RAND_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/
     || fail "GET /random/path no-cookie expected 401, got ${RAND_STATUS}"
 pass "GET /random/path no-cookie → 401"
 
+# ---- GET /auth/login → 405 Method Not Allowed (round-12 fix) ----
+GET_LOGIN="$(curl -s -i "http://127.0.0.1:${PORT}/auth/login")"
+echo "${GET_LOGIN}" | grep -qi '^HTTP/1.1 405' \
+    || fail "GET /auth/login expected 405 Method Not Allowed, got $(echo "${GET_LOGIN}" | head -1)"
+echo "${GET_LOGIN}" | grep -qi '^Allow: POST' \
+    || fail "GET /auth/login should advertise Allow: POST, OPTIONS"
+pass "GET /auth/login → 405 + Allow: POST"
+
 # ---- /quack still serves (PR-1.5 wire-compat preserved) ----
 # An empty POST body is a malformed quack message; it returns 5xx.
 # The point is the route exists and handles the request rather than
