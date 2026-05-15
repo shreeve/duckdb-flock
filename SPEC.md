@@ -1000,21 +1000,27 @@ whatever the browser happens to send.
 
 A `bundled` mode (compile-in const byte array of the UI) was originally
 planned for v0.1. Per the post-PR-4 architectural review (see §14
-"Roadmap"), it has been deferred to v0.2 in favor of a smaller,
-optional in-process **bounded asset cache** (~150 LOC) on top of
+"Roadmap"), it has been deferred to v0.2. Most "air-gapped"
+deployments can self-host an internal HTTP mirror of `ui.duckdb.org`
+and point `flock_ui_proxy_url` at it (10-line nginx config), which
+covers the primary `bundled`-mode use case with significantly less
+complexity in flock itself.
+
+A small in-process **bounded asset cache** (~150 LOC) on top of
 `proxy` mode that pass-throughs `ETag` / `Cache-Control` /
 `Last-Modified` and serves `304 Not Modified` revalidation against
-upstream. The browser's own HTTP cache + the in-process cache cover
-most of bundled mode's latency benefit without the bundle pipeline
-(`scripts/fetch-ui-assets.sh`, `ui_assets_data.cpp` codegen,
-`UI_ASSETS_VERSION.txt` pin, asset goldens, ~5–10 MB binary tax).
+upstream was originally bundled with the post-PR-7 architectural
+cleanup PR. With that PR declined (see §14), the bounded asset cache
+is reclassified as an independently-shippable v0.2 enhancement —
+worth doing on its own merits when latency to `ui.duckdb.org` becomes
+a measured user pain point, but not load-bearing for v0.1.
 
 > **Implementation order:** PR-3 shipped `proxy` mode against
-> ui.duckdb.org. PR-8 added the credential-strip allow-list invariant
-> on the proxy. The bounded local cache is part of the post-PR-7
-> architectural-cleanup PR (see §14). True air-gap-with-no-mirror
-> deployments — the only remaining `bundled`-only use case — are
-> deferred to v0.2 if real demand appears.
+> `ui.duckdb.org`. PR-8 added the credential-strip allow-list
+> invariant on the proxy. v0.1 ships exactly those two pieces. True
+> air-gap-with-no-mirror deployments — the only remaining
+> `bundled`-only use case — are deferred to v0.2 if real demand
+> appears.
 
 The flock login wrapper described in §7 lives at `GET /` (registered
 before the catch-all and before `/ui/`). The unmodified upstream UI
@@ -1285,25 +1291,24 @@ Explicitly **out of scope for v0.1**, listed for record:
   per-release refresh CI step) is significant complexity for the
   shrinking residual use case. v0.2 will re-examine if a true
   air-gap-with-no-mirror operator emerges.
-- **OpenSSL/cpp-httplib architectural cleanup** — flock currently pays
-  the OpenSSL dependency twice: once via `cpp-httplib`'s OpenSSL
-  variant (used only for the UI proxy outbound HTTPS in
-  `HandleProxyGet`) and once via httpfs (auto-loaded for CSPRNG via
-  `db.GetEncryptionUtil()` and for the `ATTACH 'quack:host'` outbound
-  via `HTTPUtil`). The plan: rewrite `HandleProxyGet` to use
-  `HTTPUtil`, rewrite `flock_crypto.cpp` to wrap
-  `duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash` /  `Hmac256`,
-  add a small in-process bounded asset cache on the proxy path,
-  migrate cpp-httplib namespace from `duckdb_httplib_openssl::` back
-  to plain `duckdb_httplib::`, and drop flock's direct
-  `find_package(OpenSSL)` + `target_link_libraries(... OpenSSL::SSL
-  OpenSSL::Crypto)`. The flock binary stops linking libssl/libcrypto
-  directly (binary-size win on the order of 200 KB – 1 MB per platform);
-  vcpkg.json's `[openssl, curl]` entries STAY because the bundled
-  httpfs sibling extension still needs both at build time. Not in v0.1
-  because the migration touches crypto + proxy + server namespace +
-  CMake and would churn `/sql` + admin handlers if interleaved with
-  PR-5/PR-6. Slotted as a dedicated post-PR-7 PR.
+- ~~**OpenSSL/cpp-httplib architectural cleanup**~~ — **evaluated and
+  declined** for v0.1 after the round-13/round-14 architectural
+  review. The original framing (two HTTP stacks, double OpenSSL link,
+  drop OpenSSL from vcpkg) collapsed once empirical investigation
+  showed `vcpkg.json`'s `[openssl, curl]` entries are required by the
+  bundled `httpfs` sibling extension regardless. The remaining
+  concrete win — flock_extension stops *directly* linking
+  libssl/libcrypto — is a 200 KB – 1 MB per-platform binary
+  reduction, against ~500 LOC of risky migration work touching
+  crypto + proxy + server namespace + CMake, plus mbedTLS extension-
+  ABI uncertainty (un-`DUCKDB_API`-annotated symbols), plus risk to
+  the PR-3 UI golden roundtrip and the PR-8 credential-strip
+  invariant. Decision: keep the working architecture; spend the
+  attention on PR-5 (`/sql`) instead. See AGENTS.md "PR-10b: declined"
+  for the full cost-benefit table and the trigger conditions that
+  would justify revisiting (downstream CVE, upstream `duckdb-ui`
+  itself migrating, real binary-size constraint, or a "drop httpfs
+  entirely" use case).
 - **`flockd` wrapper binary** — a tiny C++ binary that hides the
   `duckdb -no-stdin -init …` invocation behind `flockd /data/db.duckdb`.
   Not shipped in v0.1: the unwrapped command is short, an init script is
