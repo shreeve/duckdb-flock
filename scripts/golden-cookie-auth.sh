@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Golden HTTP-roundtrip test for PR-4 cookie auth + CORS allow-list.
+# Golden HTTP-roundtrip test for PR-4 cookie auth + CORS allow-list,
+# plus PR-8 credential-strip on the UI proxy.
 #
 # Why a bash script (not test/sql/flock.test): sqllogictest can only
 # call SQL functions, not curl. The cookie roundtrip — POST /auth/login
@@ -13,12 +14,19 @@
 #   - POST /auth/login JSON body         → 200 (alternate input form)
 #   - POST /auth/logout                  → 200, Set-Cookie clears with Max-Age=0
 #   - GET /                              → 200, body contains the login page marker
-#   - GET / with valid cookie            → attempts proxy (network-dependent)
 #   - GET /random/path no cookie         → 401
 #   - GET /info no cookie                → 204, NO Access-Control-Allow-Origin: *
 #   - GET /info with allowed Origin      → 204 + ACAO echoes the matching origin
 #   - GET /info with disallowed Origin   → 204 + NO ACAO header
+#   - GET /auth/login                    → 405 Method Not Allowed (round-12 fix)
 #   - PR-1.5 wire-compat: /quack still serves byte-for-byte
+#   - PR-8: UI proxy never forwards flock auth material upstream
+#
+# The PR-8 leak test points flock's `ui_remote_url` setting at a tiny
+# Python listener instead of `https://ui.duckdb.org`, captures the
+# raw bytes of whatever flock sends upstream when an authenticated
+# user fetches a UI asset, and asserts the captured request contains
+# NO `flock_session=`, NO `Authorization:`, and NO `X-Flock-*` header.
 #
 # Usage:
 #   make release
@@ -33,10 +41,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXT_PATH="${REPO_ROOT}/build/release/extension/flock/flock.duckdb_extension"
 DUCKDB_BIN="${REPO_ROOT}/build/release/duckdb"
 PORT="${FLOCK_TEST_PORT:-19496}"
+MOCK_PORT="${FLOCK_TEST_MOCK_PORT:-19497}"
 TOKEN="cookieauth-golden-token-$$"
 SERVER_LOG="$(mktemp)"
 COOKIE_JAR="$(mktemp)"
+MOCK_CAPTURE="$(mktemp)"
+MOCK_SCRIPT="$(mktemp --suffix=.py 2>/dev/null || mktemp -t mock.XXXXXX.py)"
 SERVER_PID=""
+MOCK_PID=""
 
 if [[ ! -x "${DUCKDB_BIN}" ]]; then
     echo "FATAL: ${DUCKDB_BIN} not found — run 'make release' first." >&2
@@ -46,13 +58,21 @@ if [[ ! -f "${EXT_PATH}" ]]; then
     echo "FATAL: ${EXT_PATH} not found — run 'make release' first." >&2
     exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "FATAL: python3 is required for the PR-8 leak-test mock listener." >&2
+    exit 1
+fi
 
 cleanup() {
     if [[ -n "${SERVER_PID}" ]]; then
         kill "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
     fi
-    rm -f "${SERVER_LOG}" "${COOKIE_JAR}"
+    if [[ -n "${MOCK_PID}" ]]; then
+        kill "${MOCK_PID}" 2>/dev/null || true
+        wait "${MOCK_PID}" 2>/dev/null || true
+    fi
+    rm -f "${SERVER_LOG}" "${COOKIE_JAR}" "${MOCK_CAPTURE}" "${MOCK_SCRIPT}"
 }
 trap cleanup EXIT INT TERM
 
@@ -61,11 +81,51 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 fail() { red "FAIL: $*"; exit 1; }
 pass() { green "PASS: $*"; }
 
-# Start flock server. Set flock_cors_origins so we can test the
-# allow-list path on /info too.
+# ---------------------------------------------------------------------
+# Spawn the leak-test mock listener (PR-8). Captures all incoming
+# request bytes to ${MOCK_CAPTURE}, responds 200 OK with a tiny body,
+# accepts repeatedly until killed.
+# ---------------------------------------------------------------------
+cat > "${MOCK_SCRIPT}" <<'PY'
+import os, socket, sys
+port = int(sys.argv[1]); capture = sys.argv[2]
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', port)); s.listen(8)
+while True:
+    try:
+        conn, _ = s.accept()
+        data = b''
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk: break
+            data += chunk
+            # Headers end at CRLF CRLF; for a GET that's the whole request.
+            if b'\r\n\r\n' in data: break
+        with open(capture, 'ab') as f:
+            f.write(data + b'\n--END-OF-REQUEST--\n')
+        body = b'asset-body'
+        resp = (b'HTTP/1.1 200 OK\r\n'
+                b'Content-Type: application/octet-stream\r\n'
+                b'Content-Length: ' + str(len(body)).encode() + b'\r\n'
+                b'Cache-Control: max-age=3600\r\n'
+                b'ETag: "test-etag"\r\n\r\n' + body)
+        conn.sendall(resp); conn.close()
+    except Exception as e:
+        sys.stderr.write(f'mock error: {e}\n'); break
+PY
+python3 "${MOCK_SCRIPT}" "${MOCK_PORT}" "${MOCK_CAPTURE}" &
+MOCK_PID=$!
+sleep 0.3
+
+# Start flock server. Set:
+#   - flock_cors_origins: exercise the /info CORS allow-list path
+#   - ui_remote_url: point UI proxy at our local mock instead of
+#     https://ui.duckdb.org so the PR-8 leak-test can capture exactly
+#     what flock would send upstream
 nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL flock_cors_origins='https://app.example.com';
+SET GLOBAL ui_remote_url='http://127.0.0.1:${MOCK_PORT}';
 CALL flock_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
 CALL flock_wait();
 " > "${SERVER_LOG}" 2>&1 &
@@ -178,5 +238,93 @@ QUACK_STATUS="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1
     || fail "/quack should not 404 (route must still be registered after PR-4)"
 pass "/quack still served (HTTP ${QUACK_STATUS})"
 
+# ---------------------------------------------------------------------
+# PR-8: UI proxy MUST NOT forward flock auth material upstream.
+# Authenticated user fetches a UI asset → flock proxies to the mock →
+# we read the captured request and assert no flock-auth headers.
+# ---------------------------------------------------------------------
+# Re-login and capture the cookie (we cleared it earlier with /auth/logout).
+RELOGIN_RESP="$(curl -s -i -X POST "http://127.0.0.1:${PORT}/auth/login" \
+    -H "Authorization: Bearer ${TOKEN}" -d '')"
+echo "${RELOGIN_RESP}" | grep -qi '^HTTP/1.1 200 OK' \
+    || fail "PR-8 setup: re-login expected 200, got $(echo "${RELOGIN_RESP}" | head -1)"
+RELOGIN_COOKIE="$(echo "${RELOGIN_RESP}" | grep -i '^Set-Cookie: flock_session=' \
+                  | sed -E 's/^[Ss]et-[Cc]ookie: flock_session=([^;]+).*$/\1/' | tr -d '\r')"
+[[ -n "${RELOGIN_COOKIE}" ]] || fail "PR-8 setup: failed to extract flock_session from re-login"
+
+# Helper: re-run mock-capture leak assertions on the most recent
+# captured request. Args: $1 = "auth scenario" label for messages.
+assert_no_flock_auth_leak() {
+    local scenario="$1"
+    sleep 0.2
+    if [[ ! -s "${MOCK_CAPTURE}" ]]; then
+        fail "PR-8 (${scenario}): mock listener captured no request — flock did not proxy?"
+    fi
+    if grep -qi '^Cookie:' "${MOCK_CAPTURE}"; then
+        echo "--- captured request ---" >&2; cat "${MOCK_CAPTURE}" >&2
+        fail "PR-8 LEAK (${scenario}): Cookie header forwarded to upstream UI"
+    fi
+    if grep -qi 'flock_session=' "${MOCK_CAPTURE}"; then
+        echo "--- captured request ---" >&2; cat "${MOCK_CAPTURE}" >&2
+        fail "PR-8 LEAK (${scenario}): flock_session value found in upstream request"
+    fi
+    if grep -qi '^Authorization:' "${MOCK_CAPTURE}"; then
+        echo "--- captured request ---" >&2; cat "${MOCK_CAPTURE}" >&2
+        fail "PR-8 LEAK (${scenario}): Authorization header forwarded to upstream UI"
+    fi
+    if grep -qi '^X-Flock-' "${MOCK_CAPTURE}"; then
+        echo "--- captured request ---" >&2; cat "${MOCK_CAPTURE}" >&2
+        fail "PR-8 LEAK (${scenario}): X-Flock-* header forwarded to upstream UI"
+    fi
+    if ! grep -qi '^User-Agent: flock-ui/' "${MOCK_CAPTURE}"; then
+        echo "--- captured request ---" >&2; cat "${MOCK_CAPTURE}" >&2
+        fail "PR-8 sanity (${scenario}): expected flock-ui/ User-Agent in upstream request"
+    fi
+}
+
+# ---- Scenario A: authenticate via Cookie. Verify Cookie+flock_session
+#                  do NOT leak. (The original PR-4 regression.)
+: > "${MOCK_CAPTURE}"
+ASSET_STATUS_A="$(curl -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PORT}/assets/cookie-scenario.js" \
+    -b "flock_session=${RELOGIN_COOKIE}" \
+    -H 'Accept: application/javascript' \
+    -H 'Accept-Encoding: gzip')"
+[[ "${ASSET_STATUS_A}" == "200" ]] \
+    || fail "PR-8 A: cookie-authenticated proxy expected 200, got ${ASSET_STATUS_A}"
+assert_no_flock_auth_leak "cookie auth"
+# Allow-listed headers pass through.
+grep -qi '^Accept: application/javascript' "${MOCK_CAPTURE}" \
+    || fail "PR-8 A: Accept header should be forwarded (allow-list entry)"
+grep -qi '^Accept-Encoding: gzip' "${MOCK_CAPTURE}" \
+    || fail "PR-8 A: Accept-Encoding should be forwarded (allow-list entry)"
+pass "PR-8 A: cookie-authenticated proxy strips Cookie/flock_session/Auth/X-Flock-* and forwards allow-list"
+
+# ---- Scenario B: authenticate via Bearer. Verify Authorization does
+#                  NOT leak (even though it was the credential we used
+#                  to authenticate). The bearer-first precedence
+#                  invariant means this code path actually executes.
+: > "${MOCK_CAPTURE}"
+ASSET_STATUS_B="$(curl -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PORT}/assets/bearer-scenario.js" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Accept: application/javascript')"
+[[ "${ASSET_STATUS_B}" == "200" ]] \
+    || fail "PR-8 B: bearer-authenticated proxy expected 200, got ${ASSET_STATUS_B}"
+assert_no_flock_auth_leak "bearer auth"
+pass "PR-8 B: bearer-authenticated proxy strips Authorization (the credential itself does not leak upstream)"
+
+# ---- Scenario C: authenticate via X-Flock-Token. Verify the
+#                  X-Flock-Token header does NOT leak.
+: > "${MOCK_CAPTURE}"
+ASSET_STATUS_C="$(curl -s -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${PORT}/assets/xflock-scenario.js" \
+    -H "X-Flock-Token: ${TOKEN}" \
+    -H 'Accept: application/javascript')"
+[[ "${ASSET_STATUS_C}" == "200" ]] \
+    || fail "PR-8 C: X-Flock-Token-authenticated proxy expected 200, got ${ASSET_STATUS_C}"
+assert_no_flock_auth_leak "x-flock-token auth"
+pass "PR-8 C: X-Flock-Token-authenticated proxy strips the token header upstream"
+
 echo
-green "All cookie-auth golden assertions passed."
+green "All cookie-auth + credential-strip golden assertions passed."

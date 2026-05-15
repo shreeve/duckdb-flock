@@ -430,10 +430,48 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 		client.enable_server_certificate_verification(false);
 	}
 
+	// PR-8 (round-13 GPT-5.5 review catch): build the outbound headers
+	// from a strict allow-list of safe asset-fetch headers. Pre-PR-4
+	// this code forwarded the entire Cookie header so MotherDuck's
+	// domain cookies could pass through to ui.duckdb.org. PR-4 added
+	// our own flock_session=v1.<principal_hex>... cookie under flock's
+	// origin; the browser sends it on every request to flock for any
+	// path, including /assets/*, and the old passthrough would forward
+	// it verbatim to ui.duckdb.org — leaking flock auth material to a
+	// third party.
+	//
+	// Hard rule: we forward NO request header that could carry flock
+	// auth material. Specifically NEVER:
+	//   - Cookie               (would leak flock_session)
+	//   - Authorization        (would leak Bearer token)
+	//   - X-Flock-Token        (would leak token via flock-specific header)
+	//   - X-Flock-Session-Id   (future SQL session id)
+	//   - Sec-* fetch metadata (browser-internal; not relevant upstream)
+	//
+	// The allow-list intentionally omits Origin too — sending it would
+	// expose the user's local flock URL (e.g. http://localhost:9494) to
+	// upstream and could cause upstream to issue different content based
+	// on the local host name, neither of which we want.
+	//
+	// If a future need to forward an upstream-set domain cookie back to
+	// upstream emerges, the right shape is a positive filter that keeps
+	// only cookies upstream itself set (tracked by inspecting Set-Cookie
+	// in prior responses) — NOT a Cookie passthrough that includes
+	// whatever the browser happens to send.
 	httplib::Headers headers = {{"User-Agent", user_agent}};
-	auto cookie = req.get_header_value("Cookie");
-	if (!cookie.empty()) {
-		headers.emplace("Cookie", cookie);
+	static const char *const kForwardableRequestHeaders[] = {
+	    "Accept",            // content-type negotiation
+	    "Accept-Encoding",   // gzip/br negotiation; we pass body bytes through
+	    "Accept-Language",   // localized assets if upstream supports it
+	    "If-None-Match",     // ETag revalidation (304 path; PR-10 will care)
+	    "If-Modified-Since", // legacy revalidation
+	    "Range",             // partial-content for large assets
+	};
+	for (const auto *name : kForwardableRequestHeaders) {
+		auto value = req.get_header_value(name);
+		if (!value.empty()) {
+			headers.emplace(name, value);
+		}
 	}
 
 	auto result = client.Get(req.path, req.params, headers);
