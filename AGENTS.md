@@ -38,7 +38,7 @@ incrementally.
 | **PR-5** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
 | **PR-6** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
 | **PR-7+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
-| **PR-10b (post-PR-7)** | OpenSSL / cpp-httplib architectural cleanup. Rewrite `HandleProxyGet` to use `HTTPUtil` (libcurl-via-httpfs) instead of `httplib::Client`; rewrite `flock_crypto.cpp` to wrap `MbedTlsWrapper::ComputeSha256Hash` + `Hmac256` instead of OpenSSL `SHA256`/`HMAC`; add an in-process bounded asset cache (~150 LOC) with ETag/Cache-Control passthrough on the proxy path; migrate cpp-httplib namespace `duckdb_httplib_openssl::` → plain `duckdb_httplib::`; drop `find_package(OpenSSL REQUIRED)` + `target_link_libraries(... OpenSSL::SSL OpenSSL::Crypto)` from CMakeLists; expose `flock_crypto_selftest()` SQL function for the mbedTLS ABI smoke test. CSPRNG keeps using `db.GetEncryptionUtil()` (httpfs is an unavoidable runtime dep anyway). vcpkg.json's `["openssl", "curl"]` entries STAY (the bundled httpfs sibling extension built by `extension_config.cmake:16-19` needs both — empirically confirmed when an attempted PR-9 to drop `curl` broke the build). | Anything that affects wire format. The credential-strip allow-list invariant from PR-8 must carry over to the HTTPUtil-based proxy. |
+| ~~**PR-10b**~~ | **EVALUATED AND DECLINED** for v0.1 — see "PR-10b: declined" below. The OpenSSL/cpp-httplib architectural cleanup was originally planned post-PR-7. After the round-13/round-14 architectural review reduced its scope (vcpkg deps stay; the only concrete win is dropping flock's *direct* libssl/libcrypto link), the cost-benefit no longer justified the migration risk. May be revisited under specific trigger conditions; see the dedicated section below. | n/a |
 
 When changing code, **keep docs and tests consistent with the current
 implementation status**. Don't promise anything in a release that PR-N
@@ -250,31 +250,104 @@ the browser sends it on every request to flock, including
       headers DO pass through.
 - [x] SPEC §8 rewritten with the credential-strip allow-list as a
       named invariant, not just an implementation detail.
-- [x] Codified for future change: any rewrite of `HandleProxyGet`
-      (including the planned post-PR-7 `HTTPUtil` rewrite) MUST
-      preserve the same allow-list invariant. Both
-      `src/ui/ui_handlers.cpp` and SPEC §8 carry the load-bearing
+- [x] Codified for future change: any future rewrite of
+      `HandleProxyGet` MUST preserve the same allow-list invariant.
+      Both `src/ui/ui_handlers.cpp` and SPEC §8 carry the load-bearing
       comment.
 
-### PR-9: CANCELLED — `curl` is required by httpfs sibling build
+### PR-9: CANCELLED — `curl` is required (analytical + empirical)
 
-A planned PR-9 to drop `"curl"` from `vcpkg.json` was cancelled when
-`make release` immediately broke:
+A planned PR-9 to drop `"curl"` from `vcpkg.json` was cancelled. The
+"appears unused" framing in the round-13 external handoff was a
+narrow claim about flock's direct source code (no
+`#include <curl/...>` in `src/`) — true, but consistent with "flock
+uses libcurl via `HTTPUtil` at runtime". Two independent reasons
+keep `curl` in `vcpkg.json`:
+
+**Analytical (the one I should have caught before attempting PR-9):**
+flock auto-loads `httpfs` at runtime in `src/quack/quack_client.cpp`
+(`ExtensionHelper::AutoLoadExtension(db, "httpfs")` at line 127) and
+then uses `HTTPUtil::Get(db)` at line 34 for the outbound HTTPS path
+of `ATTACH 'quack:host'`. `HTTPUtil` is DuckDB's libcurl-backed HTTP
+client (provided by httpfs). So flock USES libcurl at runtime,
+transitively through httpfs. The build pipeline that bundles httpfs
+must therefore provide libcurl, which is what `vcpkg.json`'s `curl`
+entry does.
+
+**Empirical (mechanical confirmation):** `make release` immediately
+breaks if `curl` is dropped:
 
 ```text
 No rule to make target `vcpkg_installed/arm64-osx/lib/libcurl.a',
   needed by `extension/httpfs/httpfs.duckdb_extension'
 ```
 
-`extension_config.cmake:16-19` builds httpfs as a sibling extension so
-flock's tests (specifically the PR-1.5 `/quack` runtime roundtrip in
-`test/sql/flock.test`, which exercises auto-loading httpfs) work
+`extension_config.cmake:16-19` builds httpfs as a sibling extension
+so flock's tests (specifically the PR-1.5 `/quack` runtime roundtrip
+in `test/sql/flock.test`, which exercises auto-loading httpfs) work
 end-to-end in CI. httpfs's own source needs `libcurl` for HTTP and
 `libssl`/`libcrypto` for HTTPS / S3 signing. So `vcpkg.json`'s
 `["openssl", "curl"]` list is **not dead weight** — both are required
-by the bundled httpfs build. Same constraint applies to the planned
-post-PR-7 OpenSSL cleanup: flock can stop linking libssl/libcrypto
-**directly**, but vcpkg.json's `openssl` entry stays for httpfs.
+by the bundled httpfs build, AND we use both at runtime.
+
+### PR-10b: declined — keep httplib + OpenSSL
+
+Originally planned post-PR-7: rewrite `HandleProxyGet` to
+`HTTPUtil`/libcurl, rewrite `flock_crypto.cpp` to wrap
+`MbedTlsWrapper::ComputeSha256Hash` + `Hmac256`, migrate cpp-httplib
+namespace `duckdb_httplib_openssl::` → plain `duckdb_httplib::`,
+drop flock's direct `find_package(OpenSSL)` + `target_link_libraries`,
+add a bounded asset cache + `flock_crypto_selftest()` smoke test
+function.
+
+After the round-14 GPT-5.5 review reduced scope (vcpkg deps stay
+regardless; httpfs is a mandatory runtime dep through which OpenSSL
+arrives anyway), this was **evaluated and declined for v0.1**.
+
+Cost/benefit at the actual scope:
+
+| Save | Concrete impact |
+|---|---|
+| Binary size | ~200 KB – 1 MB per platform binary; 0.6%–3% of the current 34 MB. One-time per user download. |
+| Direct OpenSSL link from flock | flock_extension stops linking libssl/libcrypto; operationally the same — OpenSSL still in-process via httpfs. |
+| One cpp-httplib namespace | Cleaner; marginal. |
+| `flock_crypto.cpp` shorter | ~10 LOC mbedTLS wrappers vs ~50 LOC OpenSSL ceremony. But the existing OpenSSL version IS written, working, and tested. |
+
+| Cost | Concrete impact |
+|---|---|
+| ~500 LOC migration | Touches crypto + proxy + server namespace + CMake. |
+| **mbedTLS ABI risk** | `MbedTlsWrapper` symbols are NOT `DUCKDB_API`-annotated. Per round-14, may not resolve from a loadable extension on some platform. If it fails: vendor `mbedtls/library/sha256.c` etc. into our build — more files to maintain across upstream rebases forever. |
+| **HandleProxyGet rewrite risk** | Per round-13: HTTPUtil "may buffer full responses, may normalize/throw on non-2xx including 304, may auto-decompress / follow redirects / alter headers, may not expose arbitrary response headers cleanly." Could regress the PR-3 UI golden roundtrip. |
+| **Re-implementing PR-8** | The credential-strip allow-list lives inside cpp-httplib `Headers` today. HTTPUtil has a different headers API; the invariant has to be re-asserted in the new shape, with new tests. |
+| Diverges from upstream `duckdb-ui` | Upstream chose `duckdb_httplib_openssl::`. Migrating away makes future rebases harder. |
+| Opportunity cost | ~1 day of work that PR-5 (`/sql`) could be using. |
+
+**Decision:** the win is small enough to be aesthetic; the migration
+risk + opportunity cost (PR-5 needs the same attention) outweighs
+it. Operationally, the user-visible behavior is identical before and
+after PR-10b — vcpkg deps stay, runtime OpenSSL dep stays via httpfs,
+binary is functionally equivalent.
+
+The current architecture (cpp-httplib + OpenSSL on the link line +
+OpenSSL libcrypto in `flock_crypto.cpp` + httpfs at runtime for
+ATTACH-outbound and CSPRNG) is the v0.1 architecture. CI is green on
+all 7 platforms; PR-8's credential-strip invariant is enforced by
+`scripts/golden-cookie-auth.sh`.
+
+**Trigger conditions that WOULD justify revisiting PR-10b later:**
+
+- Downstream forces a crypto migration (CVE in libcrypto, distribution
+  pressure, certificate-authority change that breaks our pinned
+  OpenSSL build, etc.).
+- Upstream `duckdb-ui` itself migrates away from
+  `duckdb_httplib_openssl::` (we follow to keep rebases easy).
+- A real binary-size constraint emerges (CDN size limits, embedded
+  use case, mobile distribution).
+- A real "want to drop httpfs entirely" use case emerges (then
+  everything in this conversation gets revisited from scratch).
+
+Until any of those happens: the architecture as it stands is fine.
+Don't migrate just for cleanliness.
 
 ## Critical rules — read first
 
