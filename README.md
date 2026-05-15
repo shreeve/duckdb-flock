@@ -38,10 +38,13 @@ session pool and auth model.
 > `SET GLOBAL flock_local_dev_mode = true` (with bind on loopback)
 > skips the token-paste step and uses a synthetic
 > `sha256("__FLOCK_LOCAL_DEV__")` principal so the connection-pool
-> isolation invariant still holds.
+> isolation invariant still holds; **PR-5** added the JSON `/sql`
+> endpoint (`POST /sql`) with NDJSON streaming, one-shot JSON mode,
+> prepared-parameter binding, explicit SQL sessions, per-principal
+> session ownership checks, and `OPTIONS /sql` CORS preflight.
 >
-> Still pending: the `/sql` JSON endpoint (PR-5), admin handlers
-> (PR-6). Examples below describe the eventual API.
+> Still pending: admin handlers (PR-6). Examples below describe the
+> eventual admin API.
 
 ## Quick Start
 

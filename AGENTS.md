@@ -34,8 +34,8 @@ incrementally.
 | **PR-1.5** | Enable `LOAD_TESTS` so `test/sql/flock.test` actually runs in CI. Extend the smoke test with a `/quack` runtime roundtrip block (con1 hosts via `quack_serve`, con2 attaches via `quack_query`, transactions/secrets/auth-failure all exercised, clean `quack_stop`). Document the five surgical edits to vendored `quack_extension.cpp` in [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md). Add the roundtrip-passes-after-refactor item to the PR-2 acceptance checklist below. | Anything that changes wire format or production behavior. PR-1.5 is purely test/doc infrastructure that PR-2's refactor can be measured against. |
 | **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack roundtrip test passes throughout. CI grep guard active. | UI, `/sql`, admin handlers. |
 | **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. Migrated `FlockHttpServer` from `duckdb_httplib::Server` (plain) to `duckdb_httplib_openssl::Server` (one namespace throughout — UI handlers can register on the shared server cleanly). UI assets via `proxy` mode (forward `GET /.*` to `ui.duckdb.org` over OpenSSL-backed cpp-httplib HTTPS client — `bundled` mode is post-v0.1, see SPEC §14). Auth: upstream UI's same-Origin check (allowed Origins = loopback variants + bind host) — flock cookie auth deferred to PR-4. AdminHandlers `/info` extended with `X-DuckDB-UI-Extension-Version`. `FlockHttpServer::ShutdownHandlers()` added so long-running threads (UiHandlers' Watcher, EventDispatcher's SSE consumers) get released BEFORE the active-request drain. SSE handler captures `shared_ptr<ActiveRequestGuard>` in the chunked content provider closure. CI grep guard updated to match both namespaces. | `/sql`, admin. `bundled` UI assets mode. Cookie auth + flock_crypto + login wrapper (PR-4). |
-| **PR-4** (current) | `src/flock_crypto.{cpp,hpp}` wraps OpenSSL `libcrypto` for SHA-256 (`principal_id = hex(sha256(token))` per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), CSPRNG (`RAND_bytes` for ephemeral signing key + 16-byte cookie nonce), and base64url. New `AuthHandlers` registers `POST /auth/login` (synthetic sid `__FLOCK_AUTH__:login`), `POST /auth/logout`, `OPTIONS /auth/*`, `OPTIONS /quack`. AuthManager extended with `AuthenticateRequest()` returning `{ok, principal_id, source, error_code}` (precedence: `Authorization: Bearer` → `X-Flock-Token` → `Cookie` — explicit-bad bearer never falls back to cookie). UiHandlers' Origin-set check supplemented with cookie-aware auth on `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`, AND `/localEvents`. The UI catch-all (`GET /.*`) is now cookie-gated: no valid cookie → minimal HTML login page; valid cookie → proxy through to `ui.duckdb.org` (Option B per round-11 review — single code path owns "serve UI asset"). UI connection pool keyed on `(principal_id, X-DuckDB-UI-Connection-Name)` so user-controlled connection names cannot collide across principals (round-11 blocker fix). Local-dev bypass uses fixed principal `__local_dev__` so the principal-scoped invariant holds even with `flock_local_dev_mode=true`. `flock_cors_origins` allow-list replaces the wildcard `Access-Control-Allow-Origin: *` on `/info`; `OPTIONS` preflight wired for `/quack` and `/auth/*`; `flock_serve` refuses to start if `flock_cors_origins='*'`. **Cookie signing key is ephemeral random per process** (NOT a SQL setting — closes the SQL-readable-secret leak; see SPEC §7 + §15 question 2). Settings registered: `flock_auth_cookie_ttl_s`, `flock_cors_origins`, `flock_local_dev_mode`. | `/sql` (PR-5). Admin handlers (PR-6). `bundled` UI assets mode. `(principal, ui_connection_name) → db_session_id` map in SessionManager (PR-5 once /sql lands and SessionManager genuinely needs principal scope; PR-4 only scopes UiHandlers' connection-name pool). `?destroy_sessions=true` on `/auth/logout` (logged-but-ignored in PR-4). `flock_cookie_signing_key` SQL setting (deferred to v0.2 as `FLOCK_COOKIE_SIGNING_KEY` env var). |
-| **PR-5** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
+| **PR-4** | `src/flock_crypto.{cpp,hpp}` wraps OpenSSL `libcrypto` for SHA-256 (`principal_id = hex(sha256(token))` per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), CSPRNG (`RAND_bytes` for ephemeral signing key + 16-byte cookie nonce), and base64url. New `AuthHandlers` registers `POST /auth/login` (synthetic sid `__FLOCK_AUTH__:login`), `POST /auth/logout`, `OPTIONS /auth/*`, `OPTIONS /quack`. AuthManager extended with `AuthenticateRequest()` returning `{ok, principal_id, source, error_code}` (precedence: `Authorization: Bearer` → `X-Flock-Token` → `Cookie` — explicit-bad bearer never falls back to cookie). UiHandlers' Origin-set check supplemented with cookie-aware auth on `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`, AND `/localEvents`. The UI catch-all (`GET /.*`) is now cookie-gated: no valid cookie → minimal HTML login page; valid cookie → proxy through to `ui.duckdb.org` (Option B per round-11 review — single code path owns "serve UI asset"). UI connection pool keyed on `(principal_id, X-DuckDB-UI-Connection-Name)` so user-controlled connection names cannot collide across principals (round-11 blocker fix). Local-dev bypass uses fixed principal `__local_dev__` so the principal-scoped invariant holds even with `flock_local_dev_mode=true`. `flock_cors_origins` allow-list replaces the wildcard `Access-Control-Allow-Origin: *` on `/info`; `OPTIONS` preflight wired for `/quack` and `/auth/*`; `flock_serve` refuses to start if `flock_cors_origins='*'`. **Cookie signing key is ephemeral random per process** (NOT a SQL setting — closes the SQL-readable-secret leak; see SPEC §7 + §15 question 2). Settings registered: `flock_auth_cookie_ttl_s`, `flock_cors_origins`, `flock_local_dev_mode`. | `/sql` (PR-5). Admin handlers (PR-6). `bundled` UI assets mode. `(principal, ui_connection_name) → db_session_id` map in SessionManager (PR-5 once /sql lands and SessionManager genuinely needs principal scope; PR-4 only scopes UiHandlers' connection-name pool). `?destroy_sessions=true` on `/auth/logout` (logged-but-ignored in PR-4). `flock_cookie_signing_key` SQL setting (deferred to v0.2 as `FLOCK_COOKIE_SIGNING_KEY` env var). |
+| **PR-5** (current) | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. Principal-owned SQL sessions, `/sql/sessions/new`, `DELETE /sql/sessions/<id>`, `/auth/logout?destroy_sessions=true`, and `OPTIONS /sql` CORS preflight. | Admin handlers. `/sql/cancel`. Query timeout enforcement. UiHandlers migration to SessionManager. |
 | **PR-6** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
 | **PR-7+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
 | ~~**PR-10b**~~ | **EVALUATED AND DECLINED** for v0.1 — see "PR-10b: declined" below. The OpenSSL/cpp-httplib architectural cleanup was originally planned post-PR-7. After the round-13/round-14 architectural review reduced its scope (vcpkg deps stay; the only concrete win is dropping flock's *direct* libssl/libcrypto link), the cost-benefit no longer justified the migration risk. May be revisited under specific trigger conditions; see the dedicated section below. | n/a |
@@ -224,6 +224,87 @@ Two follow-up TODOs captured in code at PR-4 merge:
    should add CSP `default-src 'self'; script-src 'nonce-<random>';`
    when the SQL endpoint adds error pages with potentially-tainted
    strings.
+
+### PR-5 acceptance closure (closed)
+
+PR-5 added the JSON `/sql` endpoint per SPEC §5.2-5.4. Design was
+reviewed with GPT-5.5 round 15 before coding; the load-bearing catches
+were: stream by DataChunk, buffer-before-write, emit mid-stream errors
+immediately in the catch, include `/sql` CORS preflight, and do not
+defer session ownership / authz / `409 SESSION_BUSY` semantics.
+
+- [x] New `SqlHandlers` registers `POST /sql`,
+      `POST /sql/sessions/new`, and `DELETE /sql/sessions/<id>` against
+      the shared `FlockHttpServer`.
+- [x] `POST /sql` accepts `{"sql","params","sessionId"}` JSON body,
+      rejects missing `sql`, multi-statement SQL, and client-supplied
+      `__FLOCK_ADMIN__:` strings with `BAD_REQUEST`.
+- [x] Auth path reuses `AuthManager::AuthenticateRequest` (Bearer →
+      X-Flock-Token → Cookie). Authz path invokes
+      `flock_authorization_function` on every `/sql` request.
+- [x] `/sql` response modes:
+      default `application/x-ndjson` row mode,
+      `application/x-ndjson; shape=chunk` chunk mode, and one-shot
+      `application/json` mode.
+- [x] NDJSON shape matches SPEC §5.2: `schema` line, `row`/`chunk`
+      lines, and `end` line; mid-stream failures emit a final
+      `{type:"error",code,message}` line while HTTP status remains 200.
+- [x] Buffer-before-write invariant: each NDJSON provider call builds
+      a full line/chunk string before `sink.write()`, so an exception
+      cannot leave a partial JSON object on the wire.
+- [x] `SqlJsonWriter` handles JSON string escaping (quotes, backslashes,
+      control chars, UTF-8 validation/replacement) and locale-neutral
+      numeric formatting.
+- [x] `SqlParamDecoder` supports Mode A implicit params and Mode B
+      typed wrappers for core scalar types (`{"type":"DECIMAL(18,4)",
+      "value":"123.4567"}`), including typed NULL.
+- [x] `SqlChunkEncoder` emits schema metadata + lossless row encodings
+      for representative core types tested in golden coverage:
+      BIGINT-as-string, DECIMAL-as-string, INTERVAL object, BLOB base64,
+      JSON text string, plus the scalar families.
+- [x] Principal-owned SQL sessions: `FlockSession.owner_principal_id`,
+      `CreateOwnedSession`, `LookupOwnedSession`, `DestroyOwnedSession`,
+      and `DestroyAllOwnedBy`. Wrong-principal / unknown session ids
+      collapse to `404 SESSION_NOT_FOUND` (anti-enumeration per SPEC §6).
+- [x] `POST /sql/sessions/new` creates an explicit session for
+      transaction state. `DELETE /sql/sessions/<id>` destroys owned
+      sessions. `BEGIN` in an ephemeral request is rejected.
+- [x] `/auth/logout?destroy_sessions=true` now destroys SQL sessions
+      owned by the authenticated principal (legacy Quack sessions with
+      empty owner are not touched).
+- [x] `AuthHandlers` registers `OPTIONS /sql` CORS preflight with the
+      same exact-origin allow-list behavior as `/quack` and `/auth/*`.
+- [x] Settings registered in `quack_extension.cpp::LoadInternal`:
+      `flock_max_sessions` (1024), `flock_max_response_rows` (0),
+      `flock_max_request_body_bytes` (268435456).
+- [x] `test/sql/flock.test` extended (40 → 43 assertions) with the
+      PR-5 settings/defaults.
+- [x] HTTP-level `/sql` golden test added:
+      `scripts/golden-sql-roundtrip.sh`. It covers CORS preflight,
+      row-mode NDJSON, chunk-mode NDJSON, one-shot JSON, validation
+      errors, auth failures, cookie auth, params, representative type
+      encodings, explicit SQL sessions, session delete, and
+      logout-destroy-sessions.
+- [x] Regression coverage remains green locally:
+      `make release`, `make test_release` (43/43),
+      `scripts/golden-cookie-auth.sh` (14/14),
+      `scripts/golden-sql-roundtrip.sh` (all assertions).
+
+PR-5 deliberate deferrals:
+
+1. **`POST /sql/cancel`** — shipped with PR-6/admin because it needs
+   admin authz (`__FLOCK_ADMIN__:sessions:cancel`) and shared interrupt
+   management.
+2. **Query-timeout enforcement (`flock_query_timeout_s`)** — PR-7
+   hardening. Setting remains in SPEC; runtime interrupt-after-N-seconds
+   is not in PR-5.
+3. **UiHandlers migration to SessionManager** — PR-4 already
+   principal-scoped the UI pool using `UIStorageExtensionInfo`. PR-5
+   does not churn working UI code; shared UI/SQL session state can be
+   revisited after v0.1 if there is a real use case.
+4. **Full nested-type param parser** — Mode B wrapper parsing supports
+   core scalar type strings in PR-5. Nested explicit wrapper type
+   parsing (`LIST<...>`, `STRUCT(...)`, etc.) is PR-7 hardening.
 
 ### PR-8 acceptance closure (closed)
 

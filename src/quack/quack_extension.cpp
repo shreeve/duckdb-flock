@@ -257,6 +257,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "(uses synthetic principal sha256(\"__FLOCK_LOCAL_DEV__\") for connection-pool keying); off by default",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
 
+	// PR-5: /sql endpoint limits per SPEC §6.
+	config.AddExtensionOption("flock_max_sessions",
+	                          "Maximum concurrent DB sessions across all principals; new session creation past "
+	                          "this limit returns 429 SESSION_LIMIT (default 1024)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("flock_max_response_rows",
+	                          "Cap on rows returned per /sql request; 0 = unlimited; truncation reflected in the "
+	                          "NDJSON end record's truncated:true field (default 0)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption(
+	    "flock_max_request_body_bytes",
+	    "Maximum POST body size for /sql JSON requests; larger requests return 413 PAYLOAD_TOO_LARGE "
+	    "(default 256 MiB; matches the nginx/Caddy reverse-proxy guidance for /quack APPEND payloads)",
+	    LogicalType::UBIGINT, Value::UBIGINT(268435456ULL), nullptr, SetScope::GLOBAL);
+
 	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
 	// existing duckdb-ui tooling/docs still apply. The local-port
 	// setting from upstream UI is intentionally NOT registered —

@@ -1,240 +1,351 @@
 # HANDOFF — duckdb-flock
 
-> **Purpose:** Hand off in-flight work between sessions. Read this top
-> to bottom before doing anything; everything you need to continue is
-> here.
+> **Purpose:** Current handoff only. Old PR-1 through PR-4-era tasks
+> were removed because they are done and merged. Read this file after
+> `AGENTS.md` and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-14 (afternoon)
-**Last fully-merged commit on `main`:** `efd130a` — PR-2: extract httplib::Server from QuackServer into shared FlockHttpServer
-**Active branch:** `pr3-ui-port-and-cookie-auth` (uncommitted; see "In flight" below)
+**Last updated:** 2026-05-15 05:30 MDT  
+**Last fully merged `main`:** `35e6c43` — PR-11: cancel PR-10b roadmap, strengthen PR-9 rationale  
+**Active branch:** `pr5-sql-endpoint`  
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-flock` · GitHub `shreeve/duckdb-flock`
 
 ## TL;DR
 
 flock is a DuckDB extension that turns one DuckDB process into a
-multi-protocol HTTP service (Quack RPC + JSON `/sql` + DuckDB UI), all
-on one port, behind one shared session/auth model. We are mid-implementation.
-PR-1, PR-1.5, and PR-2 are all merged on `main`; PR-3 (UI port) is
-**partially in progress** on a feature branch with vendoring complete
-but no integration code written yet.
+multi-protocol HTTP service on one port:
 
-## What's on `main` right now
+- Quack RPC (`POST /quack`) — merged and roundtrip-tested.
+- DuckDB UI (`/ddb/*`, `/localEvents`, `/localToken`, `GET /.*`) —
+  merged, cookie-gated, credential-strip tested.
+- JSON SQL (`POST /sql`) — **PR-5 is in progress locally**.
 
-| Commit | What it shipped |
-|---|---|
-| `efd130a` | **PR-2:** Extracted `httplib::Server` from upstream's `QuackServer`/`HttpQuackServer` into a process-static `FlockHttpServer`. `SessionManager` + `AuthManager` are standalone subsystems. `flock_serve` / `flock_stop` / `flock_wait` table functions per SPEC §9 (single-server-per-process). `quack_serve` / `quack_stop` are thin shims delegating to the same backing state. `/health` and `/info` admin endpoints. CI grep guard enforces single `duckdb_httplib::Server` owner. **5/5 platform variants green.** |
-| `1ae829a` | **docs:** Kept OpenSSL (not dropping); restored `proxy` as the default `flock_ui_assets` mode (`bundled` deferred to post-v0.1). Added `src/flock_crypto.{cpp,hpp}` plan for PR-3 (OpenSSL `libcrypto` wrappers; no vendored Brad Conte SHA-256). |
-| `d9d12dd` | **PR-1.5:** `/quack` runtime roundtrip test in `test/sql/flock.test`. Regression baseline that PR-2 had to pass unchanged. Includes `LOAD_TESTS` opt-in for sqllogictest discovery. `docs/upstream-quack-patches.md` documents the 5 surgical edits to vendored `quack_extension.cpp`. |
-| `2e032df` | **PR-1:** Vendored `duckdb-quack` source (commit `90bd70e` of branch `v1.5-variegata`) as `src/quack/`. Renamed build identifiers (`EXT_NAME=flock`, `TARGET_NAME=flock`). Five surgical edits to `quack_extension.cpp` (entry symbol, version macro, `flock_version()` registration, `Name()` returns `"flock"`, `SetDescription` text). |
-| `5b8e89b` | **docs:** Locked in PR-1 plan; dropped `flockd` wrapper binary and UI proxy mode (the latter restored later in `1ae829a`). |
+The architecture is intentionally still `httplib + OpenSSL` for v0.1.
+The proposed PR-10b migration to mbedTLS/HTTPUtil/plain-httplib was
+evaluated and declined. Do not restart that migration unless the
+trigger conditions in `AGENTS.md` are met.
 
-## In flight (PR-3 work, on `pr3-ui-port-and-cookie-auth` branch)
+## Merged state on `main`
 
-**Branch:** `pr3-ui-port-and-cookie-auth`
-**Uncommitted local changes:** vendored UI source + version.hpp patch.
+Latest merged chain:
 
+| PR | Status | Notes |
+|---|---|---|
+| PR-1 | merged | Vendored `duckdb-quack` as `src/quack/`; extension build name `flock`. |
+| PR-1.5 | merged | `/quack` runtime roundtrip in `test/sql/flock.test`; current regression baseline. |
+| PR-2 | merged | Shared `FlockHttpServer`, `SessionManager`, `AuthManager`, `flock_serve`/`stop`/`wait`, `/health`, `/info`. |
+| PR-3 | merged | Vendored `duckdb-ui`; `UiHandlers`; `duckdb_httplib_openssl::` namespace; UI proxy mode. |
+| PR-4 | merged | `flock_crypto`, cookie auth, `/auth/login`, `/auth/logout`, cookie-gated UI and `/ddb/*`, CORS allow-list. |
+| PR-7 | merged | Corrected misleading CSPRNG comments (`GetEncryptionUtil` is OpenSSL-via-httpfs). |
+| PR-8 | merged | Security fix: UI proxy strips `Cookie`, `Authorization`, `X-Flock-*`, etc. before forwarding upstream. |
+| PR-10a | merged | Docs: v0.1 UI assets = proxy/disabled; bundled deferred to v0.2. |
+| PR-11 | merged | Docs: cancelled PR-10b migration; strengthened why `curl` is required. |
+
+All merged PRs were green on the 7-target CI matrix at merge time.
+
+## Active work: PR-5 (`/sql` endpoint)
+
+### Branch
+
+`pr5-sql-endpoint`
+
+### Current local status
+
+Uncommitted local changes currently touch:
+
+```text
+src/CMakeLists.txt
+src/auth_handlers.cpp
+src/flock_http_server.cpp
+src/flock_session.cpp
+src/include/auth_handlers.hpp
+src/include/flock_http_server.hpp
+src/include/flock_session.hpp
+src/quack/quack_extension.cpp
+src/include/sql_chunk_encoder.hpp
+src/include/sql_handlers.hpp
+src/include/sql_json_writer.hpp
+src/include/sql_param_decoder.hpp
+src/sql_chunk_encoder.cpp
+src/sql_handlers.cpp
+src/sql_json_writer.cpp
+src/sql_param_decoder.cpp
 ```
-?? src/ui/    (1461 LOC vendored from misc/duckdb-ui/src/, plus
-                src/ui/include/version.hpp patched to provide
-                fallback defaults for UI_EXTENSION_SEQ_NUM /
-                UI_EXTENSION_GIT_SHA — see "Critical findings" below)
-```
 
-**Nothing else has been touched on this branch. Nothing has been committed or pushed yet.**
-
-### What was supposed to be done in PR-3 (per AGENTS.md "Implementation roadmap")
-
-Per the user's choice of split-strategy (B): vendor + adapt UI handlers, NO cookie auth changes (those move to PR-4).
-
-| Task | Status |
-|---|---|
-| Vendor `misc/duckdb-ui/src/` → `src/ui/` | DONE locally, NOT committed |
-| Patch `src/ui/include/version.hpp` for build-time defines | DONE locally, NOT committed |
-| **Migrate FlockHttpServer to `duckdb_httplib_openssl::Server`** | NOT STARTED — see Critical findings below; this is necessary work I discovered mid-session |
-| Refactor `src/ui/http_server.cpp` (737 LOC) → new `UiHandlers` class | NOT STARTED |
-| Adapt `ui_extension.cpp` settings/storage-extension into our `quack_extension.cpp::LoadInternal` | NOT STARTED |
-| Wire `UiHandlers` into `FlockHttpServer::RegisterBuiltinHandlers` | NOT STARTED |
-| Reconcile `/info` between AdminHandlers + UI (UI wants `X-DuckDB-UI-Extension-Version` header) | NOT STARTED |
-| Update `src/CMakeLists.txt` (compile new `src/ui/` sources, exclude `ui_extension.cpp`) | NOT STARTED |
-| Update CI grep guard for the new namespace migration | NOT STARTED |
-| Add `docs/upstream-ui-patches.md` (mirroring `upstream-quack-patches.md` pattern) | NOT STARTED |
-
-## Critical findings to internalize before continuing PR-3
-
-### 1. The `httplib` namespace migration is required
-
-I had originally claimed PR-3 wouldn't need to touch FlockHttpServer's underlying `duckdb_httplib::Server` type. **That was wrong.** Mid-session I discovered:
-
-DuckDB compiles cpp-httplib **twice** — once without OpenSSL (namespace `duckdb_httplib`) and once with (namespace `duckdb_httplib_openssl`). The two namespaces produce **separate C++ types** (not just different builds with the same names):
-
-- `duckdb_httplib::Request` ≠ `duckdb_httplib_openssl::Request` (compiler considers these unrelated)
-- `duckdb_httplib::Server::Get(path, lambda)` requires `lambda` to take `duckdb_httplib::Request&`
-- Upstream UI's handlers take `duckdb_httplib_openssl::Request&`
-
-To register UI handlers against our shared FlockHttpServer, **either**:
-
-**(a) Migrate FlockHttpServer to `duckdb_httplib_openssl::Server`** (clean — cascades through ~5 files of PR-2 code: `flock_http_server.{cpp,hpp}`, `quack_server.{cpp,hpp}`, `admin_handlers.{cpp,hpp}`, plus the `.github/workflows/architecture-guard.yml` grep). The `_openssl` variant is API-compatible with the plain variant — same surface plus HTTPS support. ~50-100 LOC of mechanical change cascading through the named files. **Recommended.**
-
-**(b) Add type-conversion shims in UiHandlers** so openssl-namespace Handle methods can be called from plain-namespace lambdas. Manual field copying between Request/Response types. ~50 LOC of ugly glue per Handle. NOT recommended.
-
-**Decision lock:** go with (a). Update PR-2's invariant accordingly. The CI grep guard at `.github/workflows/architecture-guard.yml` needs to detect ownership patterns for the openssl namespace too:
+The branch currently **builds**:
 
 ```bash
-# new pattern (matches both variants)
-grep -REn '(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib(_openssl)?::Server\s*>' src
+make release
 ```
 
-The single-owner invariant still holds — it's just `duckdb_httplib_openssl::Server` instead of `duckdb_httplib::Server`. AGENTS.md "PR-2 acceptance checklist" reference to the grep needs updating to the new pattern.
+last completed successfully after the most recent fixes.
 
-### 2. The `MemoryStream` pattern in `/quack` is NOT a bug
+Existing sqllogic tests still pass:
 
-GPT-5.5 round-8 review flagged this code as a use-after-free / wrong-bytes bug:
-
-```cpp
-MemoryStream stream;
-content_reader([&](const char *data, size_t data_length) {
-    stream.WriteData((data_ptr_t)data, data_length);
-    return true;
-});
-auto response = self->HandleMessage(stream);
-response->ToMemoryStream(stream);  // SAME stream — does this corrupt?
-res.set_content((const char *)stream.GetData(), stream.GetPosition(), "application/vnd.duckdb");
+```bash
+make test_release
+# 43/43 assertions pass
 ```
 
-**It's safe.** `QuackMessage::ToMemoryStream(write_stream)` (in `src/quack/quack_message.cpp:91`) calls `write_stream.Rewind()` on entry, resetting position to 0. The response cleanly overwrites the request bytes from offset 0. Verified by PR-1.5's CI roundtrip test passing on all platforms.
+### What is implemented locally so far
 
-Don't be tempted to "fix" this by splitting into two streams — it's working as designed.
+1. **`SqlJsonWriter`**
+   - Files: `src/include/sql_json_writer.hpp`, `src/sql_json_writer.cpp`.
+   - Minimal JSON output helper.
+   - Escapes quotes, backslashes, control chars, preserves valid UTF-8,
+     replaces invalid UTF-8 with U+FFFD.
+   - Important round-15 rule: buffer JSON into a string before writing
+     to network; never half-write a JSON object.
 
-### 3. `Stop()` is synchronous in PR-2 (intentional)
+2. **`SqlChunkEncoder`**
+   - Files: `src/include/sql_chunk_encoder.hpp`, `src/sql_chunk_encoder.cpp`.
+   - Emits schema, row, chunk, end, error, one-shot JSON.
+   - Covers many SPEC §5.4 types:
+     integer family, hugeint/uhugeint as strings, decimal as string,
+     varchar, uuid, date/time/timestamp/timestamptz, interval object,
+     blob base64, list/array/struct/map/union/enum, fallback extension
+     types as `lossless:false`.
+   - Known caveat: complex nested types compile but need more HTTP
+     golden tests before trusting fully.
 
-`FlockServerState::Stop()` previously detached a destruction thread; PR-2 round-8 review found that this allowed a transient "two-servers" race where a concurrent `flock_serve` could rebind the port while the old server was still tearing down. **It's now synchronous.** This blocks the SQL caller for the duration of in-flight requests — acceptable trade-off; PR-3+ adds `Connection::Interrupt()` to bound the wait.
+3. **`SqlParamDecoder`**
+   - Files: `src/include/sql_param_decoder.hpp`, `src/sql_param_decoder.cpp`.
+   - Parses request body and `params` array.
+   - Supports Mode A implicit coercion and Mode B `{type,value}` wrapper.
+   - Uses `TransformStringToLogicalType(type, context)` for Mode B.
+   - Uses `duckdb::vector<Value>` intentionally so
+     `PreparedStatement::Execute(vector<Value>&)` overload is selected.
 
-### 4. `Close()` drain-loops forever (intentional, with a TODO)
+4. **Principal-owned sessions**
+   - Files: `src/include/flock_session.hpp`, `src/flock_session.cpp`.
+   - `FlockSession` now has `owner_principal_id`.
+   - New methods:
+     - `CreateOwnedSession(session_id, principal_id)`
+     - `LookupOwnedSession(session_id, principal_id)`
+     - `DestroyOwnedSession(session_id, principal_id)`
+     - `DestroyAllOwnedBy(principal_id)`
+   - Legacy Quack sessions still use `CreateNewConnection()` and have
+     empty owner. Do not migrate Quack in PR-5.
 
-`FlockHttpServer::Close()` waits for `active_requests` to reach 0, with a per-attempt timeout but no global cap. A hanging query genuinely blocks shutdown until it completes. `// TODO PR-3+:` in the code references the `Connection::Interrupt()` path that will fix this. **Do not "fix" this with a hard-destroy on timeout — that re-introduces the use-after-free risk that motivated the refactor.**
+5. **`SqlHandlers`**
+   - Files: `src/include/sql_handlers.hpp`, `src/sql_handlers.cpp`.
+   - Routes:
+     - `POST /sql`
+     - `POST /sql/sessions/new`
+     - `DELETE /sql/sessions/<id>`
+   - Supports:
+     - Auth via `AuthManager::AuthenticateRequest`.
+     - Authz via `flock_authorization_function`.
+     - Rejects client SQL beginning with `__FLOCK_ADMIN__:`.
+     - Rejects multi-statement SQL.
+     - Rejects ephemeral `BEGIN` / `START TRANSACTION`.
+     - NDJSON streaming default.
+     - One-shot JSON with `Accept: application/json`.
+     - Chunk mode with `Accept: application/x-ndjson; shape=chunk`.
+     - `flock_max_request_body_bytes` guard.
+     - `flock_max_response_rows` in streaming path.
+   - Important round-15 rule: mid-stream exceptions are caught and an
+     error NDJSON line is emitted immediately in the catch; do not rely
+     on httplib invoking the provider again.
 
-### 5. Two TODOs in PR-2 code that should be addressed in PR-3 or PR-4
+6. **Wiring**
+   - `src/CMakeLists.txt` includes new PR-5 files.
+   - `FlockHttpServer` owns `SqlHandlers`.
+   - `AuthHandlers` now also owns `OPTIONS /sql` preflight.
+   - `/auth/logout?destroy_sessions=true` now destroys SQL sessions
+     owned by the authenticated principal.
 
-Both captured as `// TODO PR-3+:` comments:
-- `src/flock_http_server.cpp::ListenThreadMain` swallows listen exceptions silently. Route through the `Flock` log type.
-- `src/quack/quack_server.cpp::QuackHandlers::Register` uses `Access-Control-Allow-Origin: *`. Replace with the `flock_cors_origins` allow-list when cookie auth arrives in PR-4.
+7. **Settings**
+   - `src/quack/quack_extension.cpp` registers:
+     - `flock_max_sessions`
+     - `flock_max_response_rows`
+     - `flock_max_request_body_bytes`
 
-## Architectural decisions locked (don't re-litigate)
+### Verification already done
 
-| Decision | Source | Rationale |
-|---|---|---|
-| Strategy C: vendor quack source + refactor toward target architecture | This session, round 3 with GPT-5.5 | Better feedback loops than building from scratch; quack's own tests are the regression spec. PR-1 + PR-2 validated the call. |
-| Single-server-per-process | SPEC §2 | Simpler concurrency story; multi-server is YAGNI for v0.1 |
-| OpenSSL via vcpkg stays | This session, after PR-1 CI green | Toolchain risk is sunk cost; PR-1 shipped clean across 5 platforms with it. Removal would now be more work than benefit. |
-| Crypto in PR-4 uses OpenSSL `libcrypto` wrappers (`src/flock_crypto.{cpp,hpp}`) | This session | Eliminates ~300 LOC of vendored Brad Conte SHA-256 + hand-rolled HMAC. Also addresses CSPRNG concern (`RAND_bytes`). |
-| `flock_ui_assets='proxy'` is the default; `'bundled'` is the air-gapped opt-in (post-v0.1) | This session | Proxy is simpler to implement (just `duckdb_httplib_openssl::Client`); bundled needs fetch script + embed step + version pin file |
-| `flockd` wrapper binary is NOT shipped | PR-1 planning | Unwrapped `duckdb -no-stdin -init …` command is short; init script is more flexible |
-| `quack_*` SQL functions/settings are kept as functional aliases of `flock_*` | SPEC §9 | Stock-quack tooling continues to work |
-| `src/quack/` source is vendored (5 surgical edits documented in `docs/upstream-quack-patches.md`) | PR-1 | Future upstream rebases are bounded |
-| PR-3 will (when done): vendor + adapt UI handlers, no auth changes. PR-4 will add cookie auth + crypto + login wrapper | This session, when discussing scope split | Keeps each PR's blast radius bounded |
+Local verification after the `/sql/sessions/<id>` DELETE regex fix:
 
-## Implementation roadmap (in `AGENTS.md`, latest)
+```bash
+make release
+make test_release                         # 43/43
+scripts/golden-cookie-auth.sh             # 14/14
+scripts/golden-sql-roundtrip.sh           # all assertions
+```
 
-| PR | Status | Scope |
-|---|---|---|
-| PR-1 | ✓ merged (`2e032df`) | Vendor quack, rename to flock build identifiers |
-| PR-1.5 | ✓ merged (`d9d12dd`) | `/quack` runtime roundtrip test + `docs/upstream-quack-patches.md` |
-| PR-2 | ✓ merged (`efd130a`) | Extract httplib::Server into FlockHttpServer; SessionManager + AuthManager standalone; flock_serve/stop/wait |
-| **PR-3** | **in progress on branch** | Vendor duckdb-ui source; refactor http_server.cpp → UiHandlers; OpenSSL-backed proxy mode for UI assets; **NO** cookie auth (defer to PR-4) |
-| PR-4 | not started | `src/flock_crypto.{cpp,hpp}` (OpenSSL libcrypto wrappers); HMAC cookie sign/verify; `/auth/login` + `/auth/logout`; flock login wrapper at `GET /` |
-| PR-5 | not started | `/sql` endpoint per SPEC §5.2-5.4 |
-| PR-6 | not started | Admin handlers (`/whoami`, `/tables`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4 + `__FLOCK_ADMIN__:resource:action` authz |
-| PR-7+ | not started | Hardening, full CI matrix expansion, golden tests, distribution |
+The new `/sql` golden test covers:
 
-## GPT-5.5 collaboration
+- `OPTIONS /sql` CORS preflight.
+- Default NDJSON row mode.
+- NDJSON chunk mode.
+- One-shot JSON mode.
+- Missing `sql`, multi-statement reject, `__FLOCK_ADMIN__:` reject,
+  oversized body reject.
+- Invalid bearer reject.
+- Cookie auth after `/auth/login`.
+- Implicit params (`$1`) and typed wrapper params (`DECIMAL`, typed NULL).
+- Representative type encodings: BIGINT string, DECIMAL string,
+  INTERVAL object, BLOB base64, JSON text string.
+- Explicit SQL sessions: create, transaction state across requests,
+  delete, deleted-session 404.
+- `/auth/logout?destroy_sessions=true` destroys owned SQL sessions.
 
-We've been using a persistent multi-turn conversation via the `user-ai`
-MCP tool. **Conversation ID: `duckdb-flock-spec`** (the same one used
-for the original SPEC reviews — has the full project context).
+Earlier live smoke on `127.0.0.1:19498` also manually confirmed:
 
-| Round | Topic | Cost | Outcome |
-|---|---|---|---|
-| (pre-session) | 3 SPEC review rounds | $0.48 | SPEC.md ratified at v0.2 baseline |
-| 1 (this session) | PR-1 design (build scaffold) | $0.13 | 7 questions resolved; "OpenSSL via vcpkg" temporarily endorsed |
-| 2 | Refinements (drop proxy, drop flockd, no SQL stubs, vendor SHA-256 path) | $0.13 | PR-1 plan locked |
-| 3 | Strategy A vs C decision (build clean vs fork-and-refactor) | $0.15 | Picked C-minus-renaming-risk: vendor quack, only rename build identifiers in PR-1 |
-| 4 | PR-1 code review pre-CI | $0.19 | Caught 4 real bugs (constant-vector return, no SetVolatile, Name() return, sqllogictest LOAD + integer comparison) |
-| 5 | PR-2 header design review | $0.21 | Caught 12 issues including: shared_ptr<FlockSession> (not optional_ptr), process-static FlockServerState::Global(), generation-counter Wait(), drain-on-close ActiveRequestGuard, GET / NOT in QuackHandlers, std::thread (not vector), concrete EvaluateAuthQuery (not template) |
-| 6 | Reflection ("how clean does it look?") | $0.19 | Tightened claims (build proven ≠ runtime proven); recommended pre-PR-2 stock-quack-client roundtrip test (which became PR-1.5) |
-| 7 | PR-1.5 test review | $0.19 | 4 robustness tweaks (explicit non-default port 19494, 500ms sleep, idempotent DROP TABLE, "passes unchanged" wording) |
-| 8 | PR-2 implementation final review | $0.25 | Caught 3 blockers (1 real UAF in drain, 1 real race in detached destruction, 1 false alarm on MemoryStream reuse). Real ones fixed before PR-2 merge. |
-| **TOTAL THIS SESSION** | | **$1.92** | 16+ real issues caught; far cheaper than the equivalent CI-debug cycles |
+- `GET /info` → 204.
+- `POST /sql` simple NDJSON:
+  ```ndjson
+  {"type":"schema",...}
+  {"type":"row","values":[42,"hello"]}
+  {"type":"end","rowCount":1,"timeMs":0}
+  ```
+- `POST /sql` with `Accept: application/json` returned one-shot JSON.
+- Bad bearer token → 401.
+- Multi-statement request → 400.
+- `__FLOCK_ADMIN__:` request → 400.
+- `POST /sql/sessions/new` creates a session.
+- Session-bound transaction flow worked:
+  `BEGIN`, `CREATE TABLE`, `INSERT`, `SELECT count(*)`, `ROLLBACK`.
+- Parameterized session query worked:
+  `SELECT i FROM t WHERE i > $1` with `params:[1]`.
+- Type smoke for `DECIMAL`, `INTERVAL`, `DATE`, `BLOB` looked correct:
+  decimal string, interval object, date string, base64 blob.
 
-To resume the conversation in a new session, the `discuss` tool of
-the `user-ai` MCP server takes `conversation_id: "duckdb-flock-spec"`
-and the model `openai:gpt-5.5`. Past conversation context is
-preserved server-side and accessible to GPT-5.5.
+Issue discovered and fixed:
 
-## Local environment notes
+- `DELETE /sql/sessions/:id` initially returned 404 because cpp-httplib's
+  `:id` path-param syntax is not actually used by `Server::Delete()`;
+  it routes through regex directly. Fixed locally with explicit regex
+  `^/sql/sessions/([^/]+)$` and `req.matches[1]`. Re-smoked: first
+  DELETE returns 200 JSON, second DELETE returns 404 `SESSION_NOT_FOUND`.
 
-- **No local vcpkg or build environment is set up.** Each iteration
-  requires pushing to GitHub and waiting 6-50 minutes for CI. This
-  was identified as a productivity drag in PR-2 (which took 3 CI
-  cycles to land green) but never addressed.
-- **Recommendation for the next session:** spend ~45 minutes setting
-  up vcpkg locally before starting PR-3 work in earnest. Then each
-  iteration is 30s-3 min instead of CI-cycle long. Pays back across
-  PR-3, PR-4, PR-5.
-- macOS arm64 is the dev machine; CI runs on linux_amd64 (and
-  macos/windows/wasm in the full matrix).
+Known smoke caveat:
 
-## Doc references (read these before changing code)
+- The quick same-session concurrency smoke did not trigger 409 because
+  the first query finished too fast. Need a better test to hold the
+  session mutex long enough or skip 409 smoke until an integration test
+  can drive a genuinely slow query.
 
-| Doc | When to read |
-|---|---|
-| [`SPEC.md`](./SPEC.md) | The authoritative design. Read §2 for architecture, §6 for sessions, §7 for auth, §8 for UI assets, §9 for SQL functions/settings, §11 for /info headers, §14 for roadmap. |
-| [`AGENTS.md`](./AGENTS.md) | Contributor guide. Read "Implementation roadmap" + "Architecture as of PR-2" + "Critical rules" + "PR-2 acceptance checklist" before touching anything. |
-| [`README.md`](./README.md) | User-facing intro. Has the implementation-status block at top warning about what works today vs what's spec'd. |
-| [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md) | The 5 surgical edits to vendored `src/quack/quack_extension.cpp`. PR-3 will need a sibling `docs/upstream-ui-patches.md` for any edits to vendored UI source. |
-| `misc/duckdb-quack/`, `misc/duckdb-ui/` | Read-only upstream reference clones. Never edit. |
+## Remaining PR-5 tasks
 
-## Resuming PR-3 in a new session — concrete first steps
+### Correctness fixes / cleanup
 
-1. `git fetch && git checkout pr3-ui-port-and-cookie-auth` — the branch already has the vendor + version.hpp patch (uncommitted).
-2. Read this whole document.
-3. Re-read AGENTS.md Implementation roadmap + the "Critical findings" section above.
-4. (Optional but recommended) Set up local vcpkg:
+1. Re-run live smoke after the DELETE regex fix:
+   - `POST /sql/sessions/new`
+   - `DELETE /sql/sessions/<sid>` should return 200 with JSON body.
+   - second delete should return 404 JSON envelope.
+
+2. Review `SqlHandlers` for rough edges:
+   - `PreparedStatement::GetExpectedParameterTypes()` handling for
+     named/non-positional parameters is basic. Verify with `$1`, `$2`.
+   - `is_select_statement = stmt_type == SELECT_STATEMENT` may classify
+     `EXPLAIN`, `DESCRIBE`, `SHOW`, or DML `RETURNING` too simplistically.
+     PR-5 can keep this minimal if tests cover the intended surface.
+   - One-shot JSON currently ignores `truncated`; streaming `end` has
+     `truncated:true`. Decide whether one-shot should include the flag.
+   - `SqlParamDecoder` is minimal, not a full JSON parser. Good enough
+     for PR-5 if tests cover request shapes we claim to support.
+
+3. Confirm `SqlChunkEncoder` APIs compile and behave for:
+   - `BIGINT` and `UBIGINT`
+   - `HUGEINT` and `UHUGEINT`
+   - `DECIMAL`
+   - `DOUBLE NaN/Infinity`
+   - `TIMESTAMP` vs `TIMESTAMPTZ`
+   - `INTERVAL`
+   - `BLOB`
+   - `JSON` column value as string
+   - `LIST`, `STRUCT`, `MAP`
+
+### Tests done
+
+- `scripts/golden-sql-roundtrip.sh` added and passing.
+- `test/sql/flock.test` extended with PR-5 setting defaults and now
+  passes 43 assertions.
+
+### Docs done / still needed
+
+- `AGENTS.md` PR-5 acceptance closure section added.
+- README implementation-status block updated: `/sql` works after PR-5.
+- No SPEC divergence intentionally introduced. If final review finds a
+  mismatch, prefer code changes over spec changes.
+
+### Commit / PR workflow
+
+Suggested local commit split:
+
+1. `PR-5 step 1/N: JSON writer + chunk encoder + param decoder`
+2. `PR-5 step 2/N: principal-owned sessions + SqlHandlers wiring`
+3. `PR-5 step 3/N: golden SQL tests + docs`
+
+Then:
+
+```bash
+make release
+make test_release
+scripts/golden-cookie-auth.sh
+scripts/golden-sql-roundtrip.sh
+git push -u origin pr5-sql-endpoint
+gh pr create ...
+```
+
+As usual: wait for all 7 CI checks, do final GPT-5.5 spot-check, then
+squash-merge.
+
+## Design decisions / caveats to preserve
+
+- Keep `httplib + OpenSSL` architecture. Do not restart PR-10b.
+- Keep `vcpkg.json` as `["openssl", "curl"]`; both are required by
+  httpfs sibling build and runtime.
+- Do not touch `src/quack/quack_message.{cpp,hpp}`.
+- Do not edit `misc/`.
+- Do not change `/quack` wire format. `test/sql/flock.test` roundtrip
+  is the regression baseline.
+- For streaming `/sql`, always buffer an entire NDJSON line or chunk
+  before `sink.write()`.
+- Hold the session mutex for the full streaming lifetime.
+- Keep `ActiveRequestGuard` alive for the full streaming provider
+  lifetime, not just the route lambda.
+- `/sql/cancel`, query-timeout enforcement, and admin endpoints remain
+  out of PR-5 scope.
+
+## GPT-5.5 context
+
+Persistent AI conversation id: `duckdb-flock-spec`.
+
+Latest relevant round:
+
+- **Round 15** (`/sql` design check, cost ~$0.32) confirmed:
+  - roll-own JSON writer is fine if tested hard;
+  - stream by DataChunk/provider-call;
+  - buffer-before-write;
+  - emit mid-stream errors in catch immediately;
+  - always prepare once, introspect param types, execute same prepared
+    statement;
+  - leave UiHandlers connection pool alone in PR-5;
+  - include `/sql` CORS preflight in PR-5;
+  - do not defer session ownership checks, 409, authz, or midstream
+    error records.
+- **Round 16** (`/sql` implementation review, cost ~$0.49) found real
+  pre-commit blockers:
+  - streaming catch only wrapped `Fetch()` and not encoder errors;
+  - `/sql` body cap happened after httplib had already buffered body;
+  - cookie-auth `/sql` lacked Origin/Referer CSRF gate;
+  - Mode B wrapper detection was key-order dependent;
+  - OPTIONS preflight did not cover `/sql/sessions/*`.
+- **Round 17** (`/sql` blocker-fix follow-up, cost ~$0.31) said the
+  blocker fixes were sufficient for implementation readiness pending
+  normal code review / CI. It also recommended defensive handling if
+  error-line encoding itself throws; that was implemented with
+  `EmitStreamingErrorSafe()`.
+
+## If resuming after a reconnect
+
+1. `cd /Users/shreeve/Data/Code/duckdb-flock`
+2. `git status -sb`
+3. Confirm branch is `pr5-sql-endpoint`.
+4. Run:
    ```bash
-   git clone --branch 2025.12.12 https://github.com/microsoft/vcpkg ~/vcpkg
-   cd ~/vcpkg && ./bootstrap-vcpkg.sh
-   export VCPKG_TOOLCHAIN_PATH=~/vcpkg/scripts/buildsystems/vcpkg.cmake
+   make release
+   make test_release
    ```
-   Then `cd duckdb-flock && make release` should work locally (~30+ min first time, then incremental).
-5. Start the httplib namespace migration (Critical finding #1):
-   - Update `src/include/flock_http_server.hpp` and `src/flock_http_server.cpp`: change `duckdb_httplib::Server` → `duckdb_httplib_openssl::Server`. Add `#define CPPHTTPLIB_OPENSSL_SUPPORT` before the httplib include in the .cpp.
-   - Update `src/quack/quack_server.{cpp,hpp}` and `src/admin_handlers.{cpp,hpp}` similarly (`Register` signatures, lambda param types).
-   - Update `.github/workflows/architecture-guard.yml`'s grep pattern to detect both namespaces (or just match the new one).
-   - Push as a tiny commit; verify CI green; this is a self-contained intermediate step.
-6. Begin the UI handler refactor:
-   - Rewrite `src/ui/http_server.cpp` into a new `UiHandlers` class (declared in `src/ui/include/ui_handlers.hpp`). Drop the upstream singleton/lifecycle logic; keep the Handle* method bodies.
-   - Construct `UiHandlers` in `FlockHttpServer::RegisterBuiltinHandlers`. Order matters — UiHandlers' `GET /.*` catch-all MUST be registered LAST.
-   - Reconcile `/info`: AdminHandlers should also emit `X-DuckDB-UI-Extension-Version`. UiHandlers should NOT register its own `/info`.
-   - Adapt `ui_extension.cpp`'s settings + storage-extension setup into our `quack_extension.cpp::LoadInternal`. EXCLUDE `ui_extension.cpp` from CMake.
-   - Don't drop `EventDispatcher` or `Watcher` — UI needs them. Move ownership onto `UiHandlers`.
-7. Update `src/CMakeLists.txt` to compile the new UI sources.
-8. Author `docs/upstream-ui-patches.md` (mirror the upstream-quack-patches.md format).
-9. Push, watch CI, iterate.
-10. After CI green: update AGENTS.md "Implementation roadmap" to mark PR-3 done, point at PR-4. Squash-merge.
-
-## Things NOT to do
-
-- Don't drop OpenSSL or `vcpkg.json`. We considered it; PR-1 CI green made keeping it the rational call.
-- Don't try to "fix" the `MemoryStream` reuse in `quack_server.cpp::QuackHandlers::Register` (Critical finding #2).
-- Don't make `FlockServerState::Stop()` async or detach destruction (Critical finding #3).
-- Don't add a hard-destroy timeout to `FlockHttpServer::Close()` (Critical finding #4).
-- Don't register `GET /` from UiHandlers — it's reserved for the flock login wrapper that arrives in PR-4. UI's "go to /ui/" landing page can either redirect or just not exist in PR-3.
-- Don't change wire format on `/quack` for any reason. The PR-1.5 roundtrip test is the regression spec; if it fails after a PR-3 change, you broke the wrong thing.
-- Don't edit upstream quack source in `src/quack/` beyond the 5 documented edits in `docs/upstream-quack-patches.md`. If you must, document the new edit in that file.
-
-## Cumulative session metrics
-
-- 4 PRs merged this session: PR-1, PR-1.5, docs (OpenSSL+proxy restoration), PR-2
-- ~6500 LOC net into the project across those PRs
-- 5/5 CI platforms green for everything that's merged
-- $1.92 GPT-5.5 spend across 8 review rounds; 16+ real issues caught
-- ~12 hours of session time across two days
+5. Re-run the `/sql` live smoke, especially session DELETE.
+6. Continue with tests + docs.

@@ -4,7 +4,10 @@ add_subdirectory(quack)
 # AuthManager / AdminHandlers / lifecycle plumbing. PR-4 added flock_crypto
 # (libcrypto wrapper for SHA-256, HMAC-SHA256, RAND_bytes, base64url) and
 # AuthHandlers (POST /auth/login, POST /auth/logout, OPTIONS /auth/*,
-# OPTIONS /quack).
+# OPTIONS /quack). PR-5 adds SqlHandlers (POST /sql NDJSON streaming, /sql/sessions
+# lifecycle), the per-LogicalTypeId chunk encoder, the param decoder
+# (Mode A implicit + Mode B typed wrapper), and the JSON writer used
+# by both.
 add_library(
   flock_library OBJECT
   flock_extension.cpp
@@ -14,7 +17,11 @@ add_library(
   flock_crypto.cpp
   admin_handlers.cpp
   auth_handlers.cpp
-  flock_lifecycle.cpp)
+  flock_lifecycle.cpp
+  sql_json_writer.cpp
+  sql_chunk_encoder.cpp
+  sql_param_decoder.cpp
+  sql_handlers.cpp)
 
 # PR-3: vendored duckdb-ui sources, refactored into UiHandlers.
 # - http_server.cpp deleted (replaced by ui_handlers.cpp)
