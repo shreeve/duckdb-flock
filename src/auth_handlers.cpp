@@ -34,6 +34,15 @@ constexpr const char *kAllowedCorsHeaders =
 // permanent cookie.
 constexpr uint64_t kCookieMaxAgeCap = 315576000ULL;
 
+// In-place trim helpers — DuckDB's StringUtil::Trim mutates in place
+// and returns void, which doesn't compose with `token = trim(...)`.
+// We use a private overload that returns a copy.
+string TrimCopy(const string &s) {
+	string out = s;
+	StringUtil::Trim(out);
+	return out;
+}
+
 string EscapeJsonString(const string &s) {
 	string out;
 	out.reserve(s.size() + 2);
@@ -212,9 +221,9 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 	auto x_flock = req.get_header_value("X-Flock-Token");
 	if (!auth_header.empty() && auth_header.size() > 7 &&
 	    auth_header.compare(0, 7, "Bearer ") == 0) {
-		token = StringUtil::Trim(auth_header.substr(7));
+		token = TrimCopy(auth_header.substr(7));
 	} else if (!x_flock.empty()) {
-		token = StringUtil::Trim(x_flock);
+		token = TrimCopy(x_flock);
 	} else if (!req.body.empty()) {
 		if (req.body.size() > kMaxLoginBodyBytes) {
 			WriteJsonError(res, 413, "BODY_TOO_LARGE",

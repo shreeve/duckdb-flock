@@ -22,13 +22,23 @@ session pool and auth model.
 > shared `FlockHttpServer` + `flock_serve` / `flock_stop` / `flock_wait`
 > lifecycle + `/health` and `/info`; PR-3 vendored `duckdb-ui` and wired
 > `UiHandlers` against the shared server (`/ddb/*`, `/localEvents`,
-> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`).
+> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`); **PR-4** added
+> HMAC-signed `flock_session` cookie auth (`POST /auth/login` /
+> `POST /auth/logout`), the SPEC §7 cookie-aware gate on `/ddb/*`
+> + `/localEvents` + the UI catch-all, principal-scoped UI connection
+> pool, and the `flock_cors_origins` allow-list (replaces the wildcard
+> CORS on `/info` and `/quack`; `flock_serve` refuses to start on
+> `'*'`). The cookie signing key is **ephemeral random per process**
+> in v0.1 — restart logs everyone out, by design (see SPEC §7).
 >
-> **UI is local-dev-only until PR-4.** The `/ddb/*` routes use upstream
-> UI's same-Origin check (allowed Origins = loopback + bind host),
-> NOT the SPEC §7 flock cookie-auth flow. Don't expose the server on
-> a public bind address until PR-4 ships the cookie HMAC + login
-> wrapper.
+> The browser flow now: open `http://localhost:9494/`, paste the token
+> printed by `flock_serve()`, the page POSTs to `/auth/login`, sets a
+> `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
+> request proxies through to `ui.duckdb.org`. For local dev only,
+> `SET GLOBAL flock_local_dev_mode = true` (with bind on loopback)
+> skips the token-paste step and uses a synthetic
+> `sha256("__FLOCK_LOCAL_DEV__")` principal so the connection-pool
+> isolation invariant still holds.
 >
 > Still pending: the `/sql` JSON endpoint (PR-5), admin handlers
 > (PR-6). Examples below describe the eventual API.

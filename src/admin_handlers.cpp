@@ -1,5 +1,6 @@
 #include "admin_handlers.hpp"
 
+#include "flock_auth.hpp"
 #include "flock_http_server.hpp"
 #include "ui_handlers.hpp" // ui::UiHandlers::UiExtensionVersion
 
@@ -89,13 +90,23 @@ void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// the DuckDB UI can detect the server without running a query.
 	// SPEC §11 lists the headers. PR-3: added X-DuckDB-UI-Extension-Version
 	// so the official UI bundled at ui.duckdb.org sees us as a valid
-	// backend. Also added Access-Control-Allow-Origin: * to match
-	// upstream UI behavior (TODO PR-4: replace with cookie-aware
-	// flock_cors_origins allow-list).
-	http.Get("/info", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
+	// backend. PR-4: replaced wildcard CORS with flock_cors_origins
+	// allow-list lookup (W3C forbids `*` with credentialed requests
+	// and SPEC §7 explicitly forbids it once cookies are involved).
+	// Cross-origin browser callers MUST list their origin in
+	// flock_cors_origins to receive the matching ACAO header.
+	http.Get("/info", [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
 
-		res.set_header("Access-Control-Allow-Origin", "*");
+		auto request_origin = req.get_header_value("Origin");
+		if (!request_origin.empty()) {
+			auto decision = self->server.Auth().ResolveCorsOrigin(request_origin);
+			if (decision.allowed) {
+				res.set_header("Access-Control-Allow-Origin", decision.origin);
+				res.set_header("Access-Control-Allow-Credentials", "true");
+				res.set_header("Vary", "Origin");
+			}
+		}
 		res.set_header("X-Flock-Version", FlockVersion());
 		res.set_header("X-DuckDB-Version", DuckDB::LibraryVersion());
 		res.set_header("X-DuckDB-Platform", DuckDB::Platform());

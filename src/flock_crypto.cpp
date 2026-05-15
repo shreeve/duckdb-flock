@@ -64,8 +64,13 @@ std::vector<uint8_t> HmacSha256(const std::vector<uint8_t> &key, const std::stri
 	// HMAC() is the legacy one-shot convenience; still supported in
 	// OpenSSL 3.x (returns non-null on success). Avoids the
 	// EVP_MAC_CTX_new + init + update + final sequence.
+	// HMAC()'s key argument is required to be non-null even when
+	// key_len == 0; an empty key falls back to an empty array.
+	static const unsigned char kEmptyKey[1] = {0};
+	const unsigned char *key_ptr =
+	    key.empty() ? kEmptyKey : reinterpret_cast<const unsigned char *>(key.data());
 	auto *result = HMAC(EVP_sha256(),
-	                    key.empty() ? "" : reinterpret_cast<const unsigned char *>(key.data()),
+	                    key_ptr,
 	                    static_cast<int>(key.size()),
 	                    reinterpret_cast<const unsigned char *>(message.data()),
 	                    message.size(),
