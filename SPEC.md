@@ -739,10 +739,35 @@ Three accepted forms of authentication on a request:
 2. **`Cookie: flock_session=<signed>`** — issued after a successful
    token exchange at `POST /auth/login`. The cookie is HMAC-signed
    server-side (no server-side cookie lookup), `HttpOnly;
-   SameSite=Strict; Secure` (when behind HTTPS). The signing key is
-   either configured via `flock_cookie_signing_key` or auto-generated
-   per-process at server start (loses validity across restarts; that's
-   intentional — a restart logs everyone out).
+   SameSite=Strict; Secure` (when behind HTTPS, detected via
+   `X-Forwarded-Proto: https`). The signing key is auto-generated
+   per-process at server start (32 random bytes from
+   `RAND_bytes`) and held only in memory — so a process restart
+   invalidates every outstanding cookie ("a restart logs everyone
+   out"). v0.1 deliberately exposes **no SQL setting** for the
+   signing key: setting it via SQL would let any authorized SQL
+   caller read the secret and mint cookies, which expands the SQL
+   surface's blast radius. v0.2+ may introduce
+   `FLOCK_COOKIE_SIGNING_KEY` as an environment variable for
+   operators who need cookie continuity across rolling restarts.
+
+   The cookie payload is a dotted, version-tagged base64url
+   structure:
+
+   ```
+   v1 . b64url(principal_hex)
+      . b64url(expires_unix_ascii)
+      . b64url(nonce16)
+      . b64url(hmac32)
+   ```
+
+   The HMAC is computed over the **exact ASCII bytes** of the first
+   three encoded segments joined by `.` (`v1.<seg1>.<seg2>.<seg3>`),
+   so verification recomputes over the on-the-wire prefix and
+   constant-time-compares against the decoded fourth segment. The
+   payload contains no secrets — `principal_hex` is already a
+   one-way hash of the token — so HMAC + plaintext is sufficient
+   (no AEAD needed; authenticity and expiry are the requirements).
 3. **`X-Flock-Token: <token>`** — accepted as an alternative to
    `Authorization: Bearer` for environments where the latter is awkward.
 
@@ -985,7 +1010,6 @@ restored with `RESET GLOBAL`.
 | `flock_token` | VARCHAR | (auto) | Auth token; if unset, `flock_serve` generates and returns one. |
 | `flock_authentication_function` | VARCHAR | `flock_check_token` | SQL function name for auth callback. |
 | `flock_authorization_function` | VARCHAR | `flock_nop_authorization` | SQL function name for authz callback. |
-| `flock_cookie_signing_key` | VARCHAR | (auto, per-process) | HMAC key for `flock_session` cookies. |
 | `flock_auth_cookie_ttl_s` | UBIGINT | `43200` (12 h) | Cookie expiry. |
 | `flock_max_sessions` | UBIGINT | `1024` | Max concurrent DB sessions. |
 | `flock_session_ttl_s` | UBIGINT | `3600` | Idle DB-session TTL in seconds. |
@@ -1247,9 +1271,15 @@ Items that need resolution before v0.1 ships. Tracked in GitHub issues:
    protocol churn, or wait for v2.0 GA (~fall 2026) and start on a
    stable base? Recommend starting now and pinning to a v1.5.x quack
    commit; rebase to v2.0 as a single deliberate cutover.
-2. **Cookie signing key persistence.** Auto-generated per-process means
-   restarts log everyone out. For long-lived deployments, document the
-   recipe to set `flock_cookie_signing_key` from a host-managed secret.
+2. **Cookie signing key persistence.** v0.1 ships ephemeral keys only
+   (32 random bytes per process; restart invalidates every cookie).
+   The SQL-readable `flock_cookie_signing_key` setting was dropped
+   in PR-4 review because exposing the HMAC secret to authorized SQL
+   would let any SQL caller mint cookies. v0.2+ introduces
+   `FLOCK_COOKIE_SIGNING_KEY` as a process-environment variable for
+   operators who need cookie continuity across rolling restarts —
+   placed in the env (not the SQL surface) so it sits at the same
+   trust boundary as the binary itself.
 3. **Bundled UI asset version policy.** Pin per flock release vs.
    floating to upstream UI's `main`? Recommend: pin per flock release;
    one of the things `make release` does is verify the bundle hash.
