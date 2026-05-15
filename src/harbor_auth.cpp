@@ -1,6 +1,6 @@
-#include "flock_auth.hpp"
+#include "harbor_auth.hpp"
 
-#include "flock_crypto.hpp"
+#include "harbor_crypto.hpp"
 
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
@@ -11,10 +11,10 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
 
-// Match FlockHttpServer's openssl-enabled cpp-httplib so the
+// Match HarborHttpServer's openssl-enabled cpp-httplib so the
 // httplib::Request type in AuthenticateRequest's signature is the
 // same one route handlers receive. See header comment in
-// src/include/flock_http_server.hpp.
+// src/include/harbor_http_server.hpp.
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
@@ -33,7 +33,7 @@ AuthManager::~AuthManager() {
 
 void AuthManager::ValidateToken(const string &token) {
 	if (token.size() < 4) {
-		throw InvalidInputException("flock server token must be at least 4 characters long");
+		throw InvalidInputException("harbor server token must be at least 4 characters long");
 	}
 }
 
@@ -179,9 +179,12 @@ bool AuthManager::RunAuthentication(const string &session_id, const string &clie
 	if (!db_locked) {
 		return false;
 	}
-	auto fn_name = GetSettingString(*db_locked, "quack_authentication_function");
+	auto fn_name = GetSettingString(*db_locked, "harbor_authentication_function");
 	if (fn_name.empty()) {
-		return false;
+		fn_name = GetSettingString(*db_locked, "quack_authentication_function");
+	}
+	if (fn_name.empty()) {
+		fn_name = "harbor_check_token";
 	}
 	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(client_token), Value(server_token)};
@@ -193,9 +196,12 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	if (!db_locked) {
 		return false;
 	}
-	auto fn_name = GetSettingString(*db_locked, "quack_authorization_function");
+	auto fn_name = GetSettingString(*db_locked, "harbor_authorization_function");
 	if (fn_name.empty()) {
-		return false;
+		fn_name = GetSettingString(*db_locked, "quack_authorization_function");
+	}
+	if (fn_name.empty()) {
+		fn_name = "harbor_nop_authorization";
 	}
 	auto sql = StringUtil::Format("SELECT %s(?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(query)};
@@ -210,7 +216,7 @@ const std::vector<uint8_t> &AuthManager::CookieSigningKey() {
 		// 500 to whichever request triggered the first cookie issue/
 		// verify. Operationally that's correct: with a broken RNG we
 		// can't safely auth anyone.
-		signing_key = flock_crypto::RandomBytes(kSigningKeyBytes);
+		signing_key = harbor_crypto::RandomBytes(kSigningKeyBytes);
 	}
 	return signing_key;
 }
@@ -223,14 +229,14 @@ string AuthManager::IssueCookie(const string &principal_hex, uint64_t ttl_s) {
 		throw InvalidInputException("IssueCookie: principal_hex must be 64 lowercase hex chars");
 	}
 	auto expires_unix = NowUnix() + ttl_s;
-	auto nonce = flock_crypto::RandomBytes(kCookieNonceBytes);
+	auto nonce = harbor_crypto::RandomBytes(kCookieNonceBytes);
 
-	auto seg1 = flock_crypto::Base64UrlEncode(principal_hex);                                  // payload identity
-	auto seg2 = flock_crypto::Base64UrlEncode(std::to_string(expires_unix));                   // ASCII unix seconds
-	auto seg3 = flock_crypto::Base64UrlEncode(nonce);                                          // anti-replay aid
+	auto seg1 = harbor_crypto::Base64UrlEncode(principal_hex);                                  // payload identity
+	auto seg2 = harbor_crypto::Base64UrlEncode(std::to_string(expires_unix));                   // ASCII unix seconds
+	auto seg3 = harbor_crypto::Base64UrlEncode(nonce);                                          // anti-replay aid
 
 	string mac_input = string(kCookieVersion) + "." + seg1 + "." + seg2 + "." + seg3;
-	auto seg4 = flock_crypto::HmacSha256B64Url(CookieSigningKey(), mac_input);
+	auto seg4 = harbor_crypto::HmacSha256B64Url(CookieSigningKey(), mac_input);
 
 	return mac_input + "." + seg4;
 }
@@ -270,13 +276,13 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 	std::vector<uint8_t> expected_mac;
 	std::vector<uint8_t> actual_mac;
 	try {
-		actual_mac = flock_crypto::Base64UrlDecode(segments[4]);
-		expected_mac = flock_crypto::HmacSha256(CookieSigningKey(), mac_input);
+		actual_mac = harbor_crypto::Base64UrlDecode(segments[4]);
+		expected_mac = harbor_crypto::HmacSha256(CookieSigningKey(), mac_input);
 	} catch (...) {
 		result.error_code = "BAD_COOKIE_FORMAT";
 		return result;
 	}
-	if (!flock_crypto::ConstantTimeEqual(expected_mac, actual_mac)) {
+	if (!harbor_crypto::ConstantTimeEqual(expected_mac, actual_mac)) {
 		result.error_code = "BAD_COOKIE_SIG";
 		return result;
 	}
@@ -287,9 +293,9 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 	string principal_hex;
 	uint64_t expires_unix = 0;
 	try {
-		auto p_bytes = flock_crypto::Base64UrlDecode(segments[1]);
+		auto p_bytes = harbor_crypto::Base64UrlDecode(segments[1]);
 		principal_hex.assign(reinterpret_cast<const char *>(p_bytes.data()), p_bytes.size());
-		auto e_bytes = flock_crypto::Base64UrlDecode(segments[2]);
+		auto e_bytes = harbor_crypto::Base64UrlDecode(segments[2]);
 		string e_str(reinterpret_cast<const char *>(e_bytes.data()), e_bytes.size());
 		expires_unix = std::stoull(e_str);
 	} catch (...) {
@@ -343,7 +349,7 @@ AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Reques
 			return ar;
 		}
 		ar.ok = true;
-		ar.principal_id = flock_crypto::PrincipalIdHex(token);
+		ar.principal_id = harbor_crypto::PrincipalIdHex(token);
 		return ar;
 	};
 
@@ -357,18 +363,18 @@ AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Reques
 		return try_explicit_token("Authorization", AuthSource::kBearer, auth_header);
 	}
 
-	// 2. X-Flock-Token — explicit alternative for environments where
+	// 2. X-Harbor-Token — explicit alternative for environments where
 	//    Authorization is awkward (e.g. some proxies strip it).
-	auto x_flock = req.get_header_value("X-Flock-Token");
-	if (!x_flock.empty()) {
-		return try_explicit_token("X-Flock-Token", AuthSource::kXFlockToken, x_flock);
+	auto x_harbor = req.get_header_value("X-Harbor-Token");
+	if (!x_harbor.empty()) {
+		return try_explicit_token("X-Harbor-Token", AuthSource::kXHarborToken, x_harbor);
 	}
 
-	// 3. Cookie: flock_session=<value> — implicit; for the in-browser
+	// 3. Cookie: harbor_session=<value> — implicit; for the in-browser
 	//    UI flow.
 	auto cookie_header = req.get_header_value("Cookie");
 	if (!cookie_header.empty()) {
-		auto cookie_value = ExtractCookie(cookie_header, "flock_session");
+		auto cookie_value = ExtractCookie(cookie_header, "harbor_session");
 		if (!cookie_value.empty()) {
 			return VerifyCookie(cookie_value);
 		}
@@ -381,14 +387,14 @@ AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Reques
 
 void AuthManager::ValidateCorsOrigin(const string &origin) {
 	if (origin.empty()) {
-		throw InvalidInputException("flock_cors_origins entry is empty");
+		throw InvalidInputException("harbor_cors_origins entry is empty");
 	}
 	// Must be scheme://host[:port], no path, no query, no fragment.
 	// We don't fully validate URL syntax — we just enforce the shape
 	// the browser sends in Origin headers (which is exactly that).
 	auto scheme_end = origin.find("://");
 	if (scheme_end == string::npos || scheme_end == 0) {
-		throw InvalidInputException("flock_cors_origins entry '%s' has no scheme://host", origin);
+		throw InvalidInputException("harbor_cors_origins entry '%s' has no scheme://host", origin);
 	}
 	auto rest = origin.substr(scheme_end + 3);
 	if (rest.empty() ||
@@ -396,12 +402,12 @@ void AuthManager::ValidateCorsOrigin(const string &origin) {
 	    rest.find('?') != string::npos ||
 	    rest.find('#') != string::npos) {
 		throw InvalidInputException(
-		    "flock_cors_origins entry '%s' must be scheme://host[:port] with no path/query/fragment",
+		    "harbor_cors_origins entry '%s' must be scheme://host[:port] with no path/query/fragment",
 		    origin);
 	}
 	auto scheme = origin.substr(0, scheme_end);
 	if (scheme != "http" && scheme != "https") {
-		throw InvalidInputException("flock_cors_origins entry '%s' must use http or https scheme", origin);
+		throw InvalidInputException("harbor_cors_origins entry '%s' must use http or https scheme", origin);
 	}
 }
 
@@ -412,11 +418,11 @@ void AuthManager::InitCorsConfig(const string &cors_origins_setting) {
 		return;
 	}
 	if (trimmed_setting == "*") {
-		// SPEC §7: "the server refuses to start if flock_cors_origins='*'".
+		// SPEC §7: "the server refuses to start if harbor_cors_origins='*'".
 		// Wildcard origin combined with credentials is forbidden by
 		// CORS spec and by us — silently honoring it would be a
 		// browser-side privilege escalation.
-		throw InvalidInputException("flock_cors_origins='*' is forbidden (wildcard with credentials is "
+		throw InvalidInputException("harbor_cors_origins='*' is forbidden (wildcard with credentials is "
 		                            "unsafe). List specific origins instead.");
 	}
 	std::vector<string> parts = StringUtil::Split(trimmed_setting, ",");

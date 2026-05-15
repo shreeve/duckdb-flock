@@ -1,10 +1,10 @@
 #pragma once
 
 // AuthHandlers — registers authentication-related HTTP routes against
-// the shared FlockHttpServer:
+// the shared HarborHttpServer:
 //
-//   POST   /auth/login     — exchange bearer/X-Flock-Token for a
-//                            flock_session cookie
+//   POST   /auth/login     — exchange bearer/X-Harbor-Token for a
+//                            harbor_session cookie
 //   POST   /auth/logout    — clear the cookie (always 200, no info leak)
 //   OPTIONS /auth/login    — CORS preflight (when allow-list configured)
 //   OPTIONS /auth/logout   — CORS preflight
@@ -19,7 +19,7 @@
 //     actual mutating-request handler is in QuackHandlers / future
 //     SqlHandlers)
 //
-// The flock-specific GET / login wrapper lives inside UiHandlers'
+// The harbor-specific GET / login wrapper lives inside UiHandlers'
 // catch-all (Option B per round-11 review): a single code path owns
 // "serve UI asset", with the cookie check inline. Two separate route
 // registrations would force handler-recursion when an authenticated
@@ -32,7 +32,7 @@
 
 namespace duckdb {
 
-class FlockHttpServer;
+class HarborHttpServer;
 class AuthManager;
 class SessionManager;
 
@@ -40,18 +40,18 @@ class AuthHandlers {
 public:
 	// Synthetic session id passed to AuthManager::RunAuthentication
 	// when /auth/login authenticates the bearer token. Same shape as
-	// the __FLOCK_ADMIN__:resource:action convention so authz macros
+	// the __HARBOR_ADMIN__:resource:action convention so authz macros
 	// can pattern-match consistently.
-	static constexpr const char *kLoginSessionId = "__FLOCK_AUTH__:login";
+	static constexpr const char *kLoginSessionId = "__HARBOR_AUTH__:login";
 
 	// Cookie name. SPEC §7. Don't change without a migration plan.
-	static constexpr const char *kCookieName = "flock_session";
+	static constexpr const char *kCookieName = "harbor_session";
 
 	// Default cookie TTL (12 hours). Overridden by the
-	// flock_auth_cookie_ttl_s setting if configured.
+	// harbor_auth_cookie_ttl_s setting if configured.
 	static constexpr uint64_t kDefaultCookieTtlSec = 43200;
 
-	AuthHandlers(FlockHttpServer &server, AuthManager &auth, SessionManager &sessions);
+	AuthHandlers(HarborHttpServer &server, AuthManager &auth, SessionManager &sessions);
 	~AuthHandlers();
 
 	AuthHandlers(const AuthHandlers &) = delete;
@@ -68,7 +68,7 @@ private:
 	// when the allow-list is empty.
 	void HandlePreflight(const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res);
 
-	// Read flock_auth_cookie_ttl_s from settings, falling back to the
+	// Read harbor_auth_cookie_ttl_s from settings, falling back to the
 	// 12h default. Cap at uint32_t-max-seconds to keep Set-Cookie
 	// Max-Age sane (browsers reject huge Max-Age).
 	uint64_t CookieTtlSec();
@@ -80,7 +80,7 @@ private:
 	// cookie attribute (per round-11 review).
 	bool RequestIsBehindHttps(const duckdb_httplib_openssl::Request &req);
 
-	FlockHttpServer &server;
+	HarborHttpServer &server;
 	AuthManager &auth;
 	SessionManager &sessions;
 };

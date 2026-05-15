@@ -7,26 +7,26 @@
 // function from upstream QuackServer.
 //
 // PR-4 layered on:
-//   - HMAC-signed flock_session cookie: IssueCookie + VerifyCookie.
+//   - HMAC-signed harbor_session cookie: IssueCookie + VerifyCookie.
 //     Signing key is process-static, ephemeral random (32 bytes from
 //     RAND_bytes), lazy-initialized on first use under a mutex. There
 //     is deliberately NO SQL setting for the signing key — exposing
 //     the HMAC secret to authorized SQL would let any SQL caller mint
 //     cookies. v0.2 will reintroduce operator control via the
-//     FLOCK_COOKIE_SIGNING_KEY environment variable. See SPEC §7 +
+//     HARBOR_COOKIE_SIGNING_KEY environment variable. See SPEC §7 +
 //     §15 question 2.
 //   - AuthenticateRequest: unified entry point for cookie/bearer/
-//     X-Flock-Token detection with explicit precedence (Bearer >
-//     X-Flock-Token > Cookie). Bad bearer NEVER falls back to cookie
+//     X-Harbor-Token detection with explicit precedence (Bearer >
+//     X-Harbor-Token > Cookie). Bad bearer NEVER falls back to cookie
 //     (prevents ambient browser state from masking explicit-credential
 //     failures).
-//   - CORS allow-list (flock_cors_origins setting): InitCorsConfig
-//     reads the setting at flock_serve time and refuses to start if
+//   - CORS allow-list (harbor_cors_origins setting): InitCorsConfig
+//     reads the setting at harbor_serve time and refuses to start if
 //     it's '*'. ResolveCorsOrigin returns the matching origin (or
 //     empty) for a given request Origin header.
 //
 // Cryptographic primitives (SHA-256, HMAC-SHA256, RAND_bytes,
-// base64url, constant-time compare) live in src/flock_crypto.{cpp,hpp}.
+// base64url, constant-time compare) live in src/harbor_crypto.{cpp,hpp}.
 // AuthManager calls them; it doesn't reimplement them.
 
 #include <cstdint>
@@ -42,7 +42,7 @@
 // Forward-declare instead of including httplib.hpp here — the
 // AuthenticateRequest signature uses `const httplib::Request &`, but
 // pulling httplib into every translation unit that includes
-// flock_auth.hpp would be a heavy dependency. The .cpp does the include.
+// harbor_auth.hpp would be a heavy dependency. The .cpp does the include.
 namespace duckdb_httplib_openssl {
 struct Request;
 }
@@ -56,9 +56,9 @@ class DatabaseInstance;
 enum class AuthSource : uint8_t {
 	kNone = 0,
 	kBearer,        // Authorization: Bearer <token>
-	kXFlockToken,   // X-Flock-Token: <token>
-	kCookie,        // Cookie: flock_session=<signed>
-	kLocalDev       // flock_local_dev_mode bypass; principal is "__local_dev__"
+	kXHarborToken,   // X-Harbor-Token: <token>
+	kCookie,        // Cookie: harbor_session=<signed>
+	kLocalDev       // harbor_local_dev_mode bypass; principal is "__local_dev__"
 };
 
 struct AuthResult {
@@ -100,7 +100,7 @@ public:
 	// configuration auto-loads the httpfs extension and uses its
 	// OpenSSL-backed EncryptionUtil — so this IS transitively
 	// OpenSSL's RAND_bytes; we just don't link OpenSSL ourselves for
-	// THIS call (PR-4's flock_crypto.cpp does link and use OpenSSL
+	// THIS call (PR-4's harbor_crypto.cpp does link and use OpenSSL
 	// directly for cookie signing key + nonces, with no httpfs
 	// coupling). The only non-OpenSSL paths inside DuckDB's encryption
 	// dispatch are deliberately insecure (force_mbedtls_unsafe='true'
@@ -111,21 +111,26 @@ public:
 	static string GenerateRandomToken(DatabaseInstance &db);
 
 	// Run the authentication callback against a transient Connection.
-	// Reads the function name from the `quack_authentication_function`
-	// setting and invokes it as `SELECT <fn_name>(?, ?, ?)` with
-	// `(session_id, client_token, server_token)` bound as prepared
-	// parameters — never string-formatted. Returns false on any
-	// failure path (NULL, non-bool, exception, false).
+	// Reads callback settings in Harbor-primary / Quack-compatible
+	// order: `harbor_authentication_function`, then
+	// `quack_authentication_function`, then fallback
+	// `harbor_check_token`. Invokes the selected callback as
+	// `SELECT <fn_name>(?, ?, ?)` with `(session_id, client_token,
+	// server_token)` bound as prepared parameters — never
+	// string-formatted. Returns false on any failure path (NULL,
+	// non-bool, exception, false).
 	bool RunAuthentication(const string &session_id, const string &client_token);
 
 	// Run the authorization callback against a transient Connection.
-	// See header comment in flock_auth.cpp for the SQL shape and
-	// failure-path contract.
+	// Resolution order: `harbor_authorization_function`, then
+	// `quack_authorization_function`, then fallback
+	// `harbor_nop_authorization`. See harbor_auth.cpp for SQL shape
+	// and failure-path contract.
 	bool RunAuthorization(const string &session_id, const string &query);
 
 	// ---- PR-4: cookie issuance + verification ----
 
-	// Issue a signed flock_session cookie value for `principal_hex`
+	// Issue a signed harbor_session cookie value for `principal_hex`
 	// expiring `ttl_s` seconds from now. Format (per SPEC §7):
 	//
 	//   v1 . b64url(principal_hex)
@@ -136,10 +141,10 @@ public:
 	// HMAC is over the exact ASCII bytes "v1.<seg1>.<seg2>.<seg3>"
 	// using the process-static signing key (lazy-initialized on first
 	// call). Returns the cookie value (NOT including the
-	// "flock_session=" name or attributes — that's the handler's job).
+	// "harbor_session=" name or attributes — that's the handler's job).
 	string IssueCookie(const string &principal_hex, uint64_t ttl_s);
 
-	// Verify a flock_session cookie value. Returns ok=true iff:
+	// Verify a harbor_session cookie value. Returns ok=true iff:
 	//   - the value parses as v1.<seg1>.<seg2>.<seg3>.<seg4>
 	//   - HMAC over "v1.<seg1>.<seg2>.<seg3>" matches seg4 (constant-time)
 	//   - principal_hex (decoded seg1) is 64 lowercase hex chars
@@ -148,24 +153,24 @@ public:
 	AuthResult VerifyCookie(const string &cookie_value);
 
 	// Unified per-request authentication. Parses Authorization,
-	// X-Flock-Token, and Cookie headers per precedence:
+	// X-Harbor-Token, and Cookie headers per precedence:
 	//
 	//   1. Authorization: Bearer <token>     — runs RunAuthentication;
 	//                                           on FAIL returns 401
 	//                                           (no fallback to cookie)
-	//   2. X-Flock-Token: <token>            — same as bearer
-	//   3. Cookie: flock_session=<value>     — VerifyCookie (HMAC only)
+	//   2. X-Harbor-Token: <token>            — same as bearer
+	//   3. Cookie: harbor_session=<value>     — VerifyCookie (HMAC only)
 	//
 	// `synthetic_session_id` is passed to RunAuthentication when
 	// either of the explicit headers is present; common values are
-	// "__FLOCK_AUTH__:login" (for /auth/login) or the per-route sid
+	// "__HARBOR_AUTH__:login" (for /auth/login) or the per-route sid
 	// chosen by the calling handler.
 	AuthResult AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
 	                               const string &synthetic_session_id);
 
 	// ---- PR-4: CORS allow-list ----
 
-	// Parse `flock_cors_origins` setting at flock_serve time. Throws
+	// Parse `harbor_cors_origins` setting at harbor_serve time. Throws
 	// InvalidInputException if the setting is "*" (wildcard +
 	// credentials is forbidden by spec and by us — see SPEC §7).
 	// Tolerates empty / whitespace-only entries (skipped). Each entry
@@ -200,7 +205,7 @@ private:
 	std::mutex signing_key_mutex;
 	std::vector<uint8_t> signing_key; // 32 random bytes; init on first IssueCookie/VerifyCookie call
 
-	// Parsed flock_cors_origins. Each entry is an exact Origin header
+	// Parsed harbor_cors_origins. Each entry is an exact Origin header
 	// value to match against (e.g. "https://app.example.com",
 	// "http://localhost:3000"). Comparison is byte-equal.
 	std::vector<string> cors_allowed_origins;

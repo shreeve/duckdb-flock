@@ -1,9 +1,9 @@
-#include "flock_http_server.hpp"
+#include "harbor_http_server.hpp"
 
 #include "admin_handlers.hpp"
 #include "auth_handlers.hpp"
-#include "flock_auth.hpp"
-#include "flock_session.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_session.hpp"
 #include "quack_server.hpp"  // QuackHandlers
 #include "sql_handlers.hpp"
 #include "ui_handlers.hpp"   // ui::UiHandlers
@@ -25,7 +25,7 @@ constexpr int kHttplibWorkers = 128;
 constexpr int kHttplibKeepAliveCount = 128;
 constexpr int kHttplibKeepAliveTimeoutSec = 10;
 
-// Default drain timeout if the `flock_stop_drain_timeout_s` setting
+// Default drain timeout if the `harbor_stop_drain_timeout_s` setting
 // isn't configured. Matches SPEC §9.
 constexpr int kDefaultDrainTimeoutSec = 30;
 
@@ -36,7 +36,7 @@ int GetDrainTimeoutSec(weak_ptr<DatabaseInstance> &db) {
 	}
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(*db_locked);
-	if (!config.TryGetCurrentSetting("flock_stop_drain_timeout_s", setting_val)) {
+	if (!config.TryGetCurrentSetting("harbor_stop_drain_timeout_s", setting_val)) {
 		return kDefaultDrainTimeoutSec;
 	}
 	if (setting_val.IsNull()) {
@@ -57,11 +57,11 @@ int GetDrainTimeoutSec(weak_ptr<DatabaseInstance> &db) {
 
 // -- ActiveRequestGuard ---------------------------------------------------
 
-FlockHttpServer::ActiveRequestGuard::ActiveRequestGuard(FlockHttpServer &srv_p) : srv(srv_p) {
+HarborHttpServer::ActiveRequestGuard::ActiveRequestGuard(HarborHttpServer &srv_p) : srv(srv_p) {
 	srv.active_requests.fetch_add(1, std::memory_order_acq_rel);
 }
 
-FlockHttpServer::ActiveRequestGuard::~ActiveRequestGuard() {
+HarborHttpServer::ActiveRequestGuard::~ActiveRequestGuard() {
 	auto remaining = srv.active_requests.fetch_sub(1, std::memory_order_acq_rel);
 	if (remaining == 1) {
 		// We were the last in-flight request. Wake any thread blocked
@@ -71,16 +71,16 @@ FlockHttpServer::ActiveRequestGuard::~ActiveRequestGuard() {
 	}
 }
 
-// -- FlockHttpServer ------------------------------------------------------
+// -- HarborHttpServer ------------------------------------------------------
 
-FlockHttpServer::FlockHttpServer(weak_ptr<DatabaseInstance> db_p, QuackUri uri_p, string token_p)
+HarborHttpServer::HarborHttpServer(weak_ptr<DatabaseInstance> db_p, QuackUri uri_p, string token_p)
     : db(std::move(db_p)), uri(std::move(uri_p)), token(std::move(token_p)),
       started_at(std::chrono::steady_clock::now()) {
 	sessions = make_uniq<SessionManager>(db);
 	auth = make_uniq<AuthManager>(db, token);
 }
 
-FlockHttpServer::~FlockHttpServer() {
+HarborHttpServer::~HarborHttpServer() {
 	try {
 		Close();
 	} catch (...) {
@@ -88,10 +88,10 @@ FlockHttpServer::~FlockHttpServer() {
 	}
 }
 
-void FlockHttpServer::Bind() {
+void HarborHttpServer::Bind() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (state != State::CONSTRUCTED) {
-		throw InvalidInputException("FlockHttpServer::Bind called in wrong state");
+		throw InvalidInputException("HarborHttpServer::Bind called in wrong state");
 	}
 
 	server = make_uniq<duckdb_httplib_openssl::Server>();
@@ -106,48 +106,48 @@ void FlockHttpServer::Bind() {
 	server->set_tcp_nodelay(true);
 
 	if (!server->is_valid()) {
-		throw IOException("Failed to instantiate flock HTTP server at %s / %s", uri.Uri(), uri.Http());
+		throw IOException("Failed to instantiate harbor HTTP server at %s / %s", uri.Uri(), uri.Http());
 	}
 
 	// Synchronous bind so that bind() failures (e.g. EADDRINUSE) propagate
-	// to the caller of flock_serve / quack_serve.
+	// to the caller of harbor_serve / quack_serve.
 	if (!server->bind_to_port(uri.Host(), uri.Port())) {
-		throw IOException("Failed to bind flock HTTP server to %s (address in use, permission denied, or invalid host/port)",
+		throw IOException("Failed to bind harbor HTTP server to %s (address in use, permission denied, or invalid host/port)",
 		                  uri.Http());
 	}
 
 	state = State::BOUND;
 }
 
-duckdb_httplib_openssl::Server &FlockHttpServer::Server() {
+duckdb_httplib_openssl::Server &HarborHttpServer::Server() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (state != State::BOUND) {
-		throw InvalidInputException("FlockHttpServer::Server() called outside the BOUND state — "
+		throw InvalidInputException("HarborHttpServer::Server() called outside the BOUND state — "
 		                            "register routes between Bind() and StartListening()");
 	}
 	return *server;
 }
 
-void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
+void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	{
 		std::lock_guard<std::mutex> lock(state_mu);
 		if (state != State::BOUND) {
-			throw InvalidInputException("FlockHttpServer::RegisterBuiltinHandlers called in wrong state");
+			throw InvalidInputException("HarborHttpServer::RegisterBuiltinHandlers called in wrong state");
 		}
 	}
 
 	// PR-4: initialize CORS allow-list from settings BEFORE handler
 	// construction. This is the refuse-to-start point if the operator
-	// set flock_cors_origins='*' — we throw, which propagates to the
-	// flock_serve caller as a SQL error and the server never starts.
+	// set harbor_cors_origins='*' — we throw, which propagates to the
+	// harbor_serve caller as a SQL error and the server never starts.
 	auto db_locked = db.lock();
 	if (db_locked) {
 		Value cors_setting;
 		auto &config = DBConfig::GetConfig(*db_locked);
-		if (config.TryGetCurrentSetting("flock_cors_origins", cors_setting) && !cors_setting.IsNull() &&
+		if (config.TryGetCurrentSetting("harbor_cors_origins", cors_setting) && !cors_setting.IsNull() &&
 		    cors_setting.type().id() == LogicalTypeId::VARCHAR) {
 			// Throws InvalidInputException on '*' or malformed entries —
-			// propagates out of flock_serve cleanly.
+			// propagates out of harbor_serve cleanly.
 			auth->InitCorsConfig(cors_setting.GetValue<string>());
 		}
 	}
@@ -189,7 +189,7 @@ void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	ui_handlers->Register(*server);
 }
 
-void FlockHttpServer::ListenThreadMain(FlockHttpServer *srv) {
+void HarborHttpServer::ListenThreadMain(HarborHttpServer *srv) {
 	D_ASSERT(srv && srv->server);
 	try {
 		srv->server->listen_after_bind();
@@ -199,22 +199,22 @@ void FlockHttpServer::ListenThreadMain(FlockHttpServer *srv) {
 		// will reflect that listening stopped; new requests will fail at
 		// the socket layer.
 		//
-		// TODO PR-3+: route this through the Flock log type with the
+		// TODO PR-3+: route this through the Harbor log type with the
 		// exception string instead of swallowing silently. Today this
 		// fails opaquely if listen_after_bind throws unexpectedly.
 	}
 }
 
-void FlockHttpServer::StartListening() {
+void HarborHttpServer::StartListening() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (state != State::BOUND) {
-		throw InvalidInputException("FlockHttpServer::StartListening called in wrong state");
+		throw InvalidInputException("HarborHttpServer::StartListening called in wrong state");
 	}
 	listen_thread = std::thread(ListenThreadMain, this);
 	state = State::LISTENING;
 }
 
-void FlockHttpServer::StopAccepting() {
+void HarborHttpServer::StopAccepting() {
 	// Idempotent. Only closes the listening socket — does NOT join the
 	// listener thread, does NOT drain workers. Safe to call from a
 	// request-handler thread.
@@ -228,14 +228,14 @@ void FlockHttpServer::StopAccepting() {
 	state = State::CLOSING;
 }
 
-bool FlockHttpServer::DrainActiveRequests(std::chrono::seconds timeout) {
+bool HarborHttpServer::DrainActiveRequests(std::chrono::seconds timeout) {
 	std::unique_lock<std::mutex> lock(drain_mu);
 	return cv_no_active.wait_for(lock, timeout, [this] {
 		return active_requests.load(std::memory_order_acquire) == 0;
 	});
 }
 
-void FlockHttpServer::ShutdownHandlers() {
+void HarborHttpServer::ShutdownHandlers() {
 	// Tell handlers to release non-request-scoped resources (threads,
 	// blocking SSE waits, etc.) so the upcoming drain can actually
 	// reach active_requests == 0. Without this, UiHandlers' Watcher
@@ -265,7 +265,7 @@ void FlockHttpServer::ShutdownHandlers() {
 	}
 }
 
-void FlockHttpServer::Close() {
+void HarborHttpServer::Close() {
 	StopAccepting();
 	ShutdownHandlers();
 
@@ -275,7 +275,7 @@ void FlockHttpServer::Close() {
 	// causes use-after-free.
 	//
 	// PR-2 policy: drain to zero, with a long polling loop. The
-	// configured `flock_stop_drain_timeout_s` (default 30s) is the
+	// configured `harbor_stop_drain_timeout_s` (default 30s) is the
 	// per-attempt budget; if it expires while requests are still
 	// in-flight we log a warning and try again. Forever-loop because
 	// PR-2 has no interrupt mechanism — a hanging query genuinely
@@ -311,34 +311,34 @@ void FlockHttpServer::Close() {
 	state = State::CLOSED;
 }
 
-SessionManager &FlockHttpServer::Sessions() {
+SessionManager &HarborHttpServer::Sessions() {
 	D_ASSERT(sessions);
 	return *sessions;
 }
 
-AuthManager &FlockHttpServer::Auth() {
+AuthManager &HarborHttpServer::Auth() {
 	D_ASSERT(auth);
 	return *auth;
 }
 
-// -- FlockServerState (process-static singleton) --------------------------
+// -- HarborServerState (process-static singleton) --------------------------
 
-FlockServerState &FlockServerState::Global() {
+HarborServerState &HarborServerState::Global() {
 	// Function-static initialization is thread-safe in C++11 and later.
-	static FlockServerState instance;
+	static HarborServerState instance;
 	return instance;
 }
 
-void FlockServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token) {
+void HarborServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token) {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (server) {
-		throw InvalidInputException("flock server is already running on %s — flock is single-server-per-process; "
-		                            "call flock_stop or quack_stop first",
+		throw InvalidInputException("harbor server is already running on %s — harbor is single-server-per-process; "
+		                            "call harbor_stop or quack_stop first",
 		                            server->ListenUri().Uri());
 	}
 
 	// Sequence: ctor → Bind() → RegisterBuiltinHandlers(context) → StartListening()
-	auto srv = make_uniq<FlockHttpServer>(std::move(db), std::move(uri), std::move(token));
+	auto srv = make_uniq<HarborHttpServer>(std::move(db), std::move(uri), std::move(token));
 	srv->Bind();
 	srv->RegisterBuiltinHandlers(context);
 	srv->StartListening();
@@ -350,8 +350,8 @@ void FlockServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> 
 	// runs harmlessly compare less-than the new generation.
 }
 
-bool FlockServerState::Stop(const QuackUri &requested_uri) {
-	unique_ptr<FlockHttpServer> to_destroy;
+bool HarborServerState::Stop(const QuackUri &requested_uri) {
+	unique_ptr<HarborHttpServer> to_destroy;
 	{
 		std::lock_guard<std::mutex> lock(state_mu);
 		if (!server) {
@@ -359,7 +359,7 @@ bool FlockServerState::Stop(const QuackUri &requested_uri) {
 		}
 		// Only stop if the URI matches (by canonical form). This is mainly
 		// defensive — single-server-per-process means there's at most one
-		// server, but a stale flock_stop call with a different URI shouldn't
+		// server, but a stale harbor_stop call with a different URI shouldn't
 		// stop the wrong one.
 		if (server->ListenUri().CanonicalUri() != requested_uri.CanonicalUri()) {
 			return false;
@@ -370,7 +370,7 @@ bool FlockServerState::Stop(const QuackUri &requested_uri) {
 	}
 	// Synchronous teardown. We previously did (StopAccepting + detached
 	// destruction thread), but that allowed a transient "two-servers"
-	// state where flock_serve could rebind the freed port while the
+	// state where harbor_serve could rebind the freed port while the
 	// detached thread was still draining the old server's handlers
 	// (per GPT-5.5 round 8 catch #3). Synchronous Close blocks the SQL
 	// caller for the duration of in-flight requests but eliminates the
@@ -381,10 +381,10 @@ bool FlockServerState::Stop(const QuackUri &requested_uri) {
 	return true;
 }
 
-bool FlockServerState::Wait() {
+bool HarborServerState::Wait() {
 	std::unique_lock<std::mutex> lock(state_mu);
 	if (!server) {
-		throw InvalidInputException("flock_wait called with no server running — call flock_serve first");
+		throw InvalidInputException("harbor_wait called with no server running — call harbor_serve first");
 	}
 	auto my_generation = generation;
 	cv.wait(lock, [this, my_generation] {
@@ -393,12 +393,12 @@ bool FlockServerState::Wait() {
 	return true;
 }
 
-bool FlockServerState::IsRunning() {
+bool HarborServerState::IsRunning() {
 	std::lock_guard<std::mutex> lock(state_mu);
 	return server != nullptr;
 }
 
-void FlockServerState::WithCurrent(const std::function<void(FlockHttpServer &)> &fn) {
+void HarborServerState::WithCurrent(const std::function<void(HarborHttpServer &)> &fn) {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (server) {
 		fn(*server);

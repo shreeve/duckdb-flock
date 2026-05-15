@@ -1,28 +1,29 @@
-# HANDOFF — duckdb-flock
+# HANDOFF — duckdb-harbor
 
-> **Purpose:** Current handoff only. Old PR-1 through PR-4-era tasks
-> were removed because they are done and merged. Read this file after
-> `AGENTS.md` and `SPEC.md` if resuming work mid-PR.
+> **Purpose:** Current handoff only. Old PR-1 through PR-5-era tasks
+> are removed because they are merged. Read this file after `AGENTS.md`
+> and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-15 05:30 MDT  
-**Last fully merged `main`:** `35e6c43` — PR-11: cancel PR-10b roadmap, strengthen PR-9 rationale  
-**Active branch:** `pr5-sql-endpoint`  
-**Project repo:** `/Users/shreeve/Data/Code/duckdb-flock` · GitHub `shreeve/duckdb-flock`
+**Last updated:** 2026-05-15 17:30 MDT
+**Last fully merged `main`:** `4203d73` — PR-5: add JSON `/sql` endpoint with NDJSON streaming (#11)
+**Active branch:** `pr12-rename-harbor`
+**Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
+**GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
 ## TL;DR
 
-flock is a DuckDB extension that turns one DuckDB process into a
+harbor is a DuckDB extension that turns one DuckDB process into a
 multi-protocol HTTP service on one port:
 
 - Quack RPC (`POST /quack`) — merged and roundtrip-tested.
 - DuckDB UI (`/ddb/*`, `/localEvents`, `/localToken`, `GET /.*`) —
   merged, cookie-gated, credential-strip tested.
-- JSON SQL (`POST /sql`) — **PR-5 is in progress locally**.
+- JSON SQL (`POST /sql`) — merged with NDJSON streaming, principal-owned
+  sessions, golden-tested.
 
-The architecture is intentionally still `httplib + OpenSSL` for v0.1.
-The proposed PR-10b migration to mbedTLS/HTTPUtil/plain-httplib was
-evaluated and declined. Do not restart that migration unless the
-trigger conditions in `AGENTS.md` are met.
+Architecture is `httplib + OpenSSL` for v0.1. The PR-10b migration to
+mbedTLS/HTTPUtil/plain-httplib was evaluated and declined; do not
+restart it unless the trigger conditions in `AGENTS.md` are met.
 
 ## Merged state on `main`
 
@@ -30,265 +31,106 @@ Latest merged chain:
 
 | PR | Status | Notes |
 |---|---|---|
-| PR-1 | merged | Vendored `duckdb-quack` as `src/quack/`; extension build name `flock`. |
-| PR-1.5 | merged | `/quack` runtime roundtrip in `test/sql/flock.test`; current regression baseline. |
-| PR-2 | merged | Shared `FlockHttpServer`, `SessionManager`, `AuthManager`, `flock_serve`/`stop`/`wait`, `/health`, `/info`. |
+| PR-1 | merged | Vendored `duckdb-quack` as `src/quack/`; extension build name `harbor`. |
+| PR-1.5 | merged | `/quack` runtime roundtrip in `test/sql/harbor.test`; current regression baseline. |
+| PR-2 | merged | Shared `HarborHttpServer`, `SessionManager`, `AuthManager`, `harbor_serve`/`stop`/`wait`, `/health`, `/info`. |
 | PR-3 | merged | Vendored `duckdb-ui`; `UiHandlers`; `duckdb_httplib_openssl::` namespace; UI proxy mode. |
-| PR-4 | merged | `flock_crypto`, cookie auth, `/auth/login`, `/auth/logout`, cookie-gated UI and `/ddb/*`, CORS allow-list. |
+| PR-4 | merged | `harbor_crypto`, cookie auth, `/auth/login`, `/auth/logout`, cookie-gated UI and `/ddb/*`, CORS allow-list. |
 | PR-7 | merged | Corrected misleading CSPRNG comments (`GetEncryptionUtil` is OpenSSL-via-httpfs). |
-| PR-8 | merged | Security fix: UI proxy strips `Cookie`, `Authorization`, `X-Flock-*`, etc. before forwarding upstream. |
+| PR-8 | merged | Security fix: UI proxy strips `Cookie`, `Authorization`, `X-Harbor-*`, etc. before forwarding upstream. |
 | PR-10a | merged | Docs: v0.1 UI assets = proxy/disabled; bundled deferred to v0.2. |
 | PR-11 | merged | Docs: cancelled PR-10b migration; strengthened why `curl` is required. |
+| PR-5 | merged | JSON `/sql` endpoint, NDJSON streaming, principal-owned sessions, golden tests. |
 
 All merged PRs were green on the 7-target CI matrix at merge time.
 
-## Active work: PR-5 (`/sql` endpoint)
+## Active work: PR-12 (project rename)
 
-### Branch
+### Scope
 
-`pr5-sql-endpoint`
+Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Mechanical
+rename across build identifiers, source tree, SQL surface, HTTP
+cookie/headers, env vars, scripts, and docs. **No runtime behavior
+change beyond the intentional public rename.**
 
-### Current local status
+Quack compatibility intentionally preserved:
 
-Uncommitted local changes currently touch:
+- `/quack` route, wire format, and `X-Quack-Protocol-Version` header.
+- `quack:` URI scheme accepted alongside the new canonical `harbor:`.
+- `quack_*` SQL functions and settings retained as compatibility
+  aliases; `harbor_*` is now the primary surface.
+- `src/quack/` source tree, `QuackMessage`, `QuackHandlers`,
+  `QuackLogType` all unchanged.
+- Storage extension registered under both `"harbor"` and `"quack"`
+  type keys; canonical listener identity stays `quack:host:port` so
+  start/stop calls match across schemes.
 
-```text
-src/CMakeLists.txt
-src/auth_handlers.cpp
-src/flock_http_server.cpp
-src/flock_session.cpp
-src/include/auth_handlers.hpp
-src/include/flock_http_server.hpp
-src/include/flock_session.hpp
-src/quack/quack_extension.cpp
-src/include/sql_chunk_encoder.hpp
-src/include/sql_handlers.hpp
-src/include/sql_json_writer.hpp
-src/include/sql_param_decoder.hpp
-src/sql_chunk_encoder.cpp
-src/sql_handlers.cpp
-src/sql_json_writer.cpp
-src/sql_param_decoder.cpp
-```
+Auth resolution order: Harbor settings → Quack settings (compat) →
+built-in default.
 
-The branch currently **builds**:
+### Local verification
 
 ```bash
-make release
+make release            # artifact: build/release/extension/harbor/harbor.duckdb_extension
+make test_release       # 43/43 assertions
+scripts/golden-cookie-auth.sh    # 14/14, including PR-8 credential strip on X-Harbor-* / harbor_session
+scripts/golden-sql-roundtrip.sh  # all assertions
 ```
 
-last completed successfully after the most recent fixes.
+Smoke tests confirm:
 
-Existing sqllogic tests still pass:
+- `LOAD harbor; SELECT harbor_version();` works.
+- `harbor_check_token`, `harbor_nop_authorization`, `harbor_uri_parser`
+  registered.
+- `harbor_serve('harbor:127.0.0.1:N')` followed by
+  `harbor_stop('quack:127.0.0.1:N')` works (canonical-id matching
+  across schemes).
+- `quack_serve('quack:...')`, `quack_query(...)`, `quack_stop('harbor:...')`
+  all work (full Quack-side compat).
+- `ATTACH 'harbor:127.0.0.1:N' AS h (TYPE harbor, TOKEN '...');
+   SELECT * FROM h.query('SELECT 99 AS x')` works.
 
-```bash
-make test_release
-# 43/43 assertions pass
-```
-
-### What is implemented locally so far
-
-1. **`SqlJsonWriter`**
-   - Files: `src/include/sql_json_writer.hpp`, `src/sql_json_writer.cpp`.
-   - Minimal JSON output helper.
-   - Escapes quotes, backslashes, control chars, preserves valid UTF-8,
-     replaces invalid UTF-8 with U+FFFD.
-   - Important round-15 rule: buffer JSON into a string before writing
-     to network; never half-write a JSON object.
-
-2. **`SqlChunkEncoder`**
-   - Files: `src/include/sql_chunk_encoder.hpp`, `src/sql_chunk_encoder.cpp`.
-   - Emits schema, row, chunk, end, error, one-shot JSON.
-   - Covers many SPEC §5.4 types:
-     integer family, hugeint/uhugeint as strings, decimal as string,
-     varchar, uuid, date/time/timestamp/timestamptz, interval object,
-     blob base64, list/array/struct/map/union/enum, fallback extension
-     types as `lossless:false`.
-   - Known caveat: complex nested types compile but need more HTTP
-     golden tests before trusting fully.
-
-3. **`SqlParamDecoder`**
-   - Files: `src/include/sql_param_decoder.hpp`, `src/sql_param_decoder.cpp`.
-   - Parses request body and `params` array.
-   - Supports Mode A implicit coercion and Mode B `{type,value}` wrapper.
-   - Uses `TransformStringToLogicalType(type, context)` for Mode B.
-   - Uses `duckdb::vector<Value>` intentionally so
-     `PreparedStatement::Execute(vector<Value>&)` overload is selected.
-
-4. **Principal-owned sessions**
-   - Files: `src/include/flock_session.hpp`, `src/flock_session.cpp`.
-   - `FlockSession` now has `owner_principal_id`.
-   - New methods:
-     - `CreateOwnedSession(session_id, principal_id)`
-     - `LookupOwnedSession(session_id, principal_id)`
-     - `DestroyOwnedSession(session_id, principal_id)`
-     - `DestroyAllOwnedBy(principal_id)`
-   - Legacy Quack sessions still use `CreateNewConnection()` and have
-     empty owner. Do not migrate Quack in PR-5.
-
-5. **`SqlHandlers`**
-   - Files: `src/include/sql_handlers.hpp`, `src/sql_handlers.cpp`.
-   - Routes:
-     - `POST /sql`
-     - `POST /sql/sessions/new`
-     - `DELETE /sql/sessions/<id>`
-   - Supports:
-     - Auth via `AuthManager::AuthenticateRequest`.
-     - Authz via `flock_authorization_function`.
-     - Rejects client SQL beginning with `__FLOCK_ADMIN__:`.
-     - Rejects multi-statement SQL.
-     - Rejects ephemeral `BEGIN` / `START TRANSACTION`.
-     - NDJSON streaming default.
-     - One-shot JSON with `Accept: application/json`.
-     - Chunk mode with `Accept: application/x-ndjson; shape=chunk`.
-     - `flock_max_request_body_bytes` guard.
-     - `flock_max_response_rows` in streaming path.
-   - Important round-15 rule: mid-stream exceptions are caught and an
-     error NDJSON line is emitted immediately in the catch; do not rely
-     on httplib invoking the provider again.
-
-6. **Wiring**
-   - `src/CMakeLists.txt` includes new PR-5 files.
-   - `FlockHttpServer` owns `SqlHandlers`.
-   - `AuthHandlers` now also owns `OPTIONS /sql` preflight.
-   - `/auth/logout?destroy_sessions=true` now destroys SQL sessions
-     owned by the authenticated principal.
-
-7. **Settings**
-   - `src/quack/quack_extension.cpp` registers:
-     - `flock_max_sessions`
-     - `flock_max_response_rows`
-     - `flock_max_request_body_bytes`
-
-### Verification already done
-
-Local verification after the `/sql/sessions/<id>` DELETE regex fix:
-
-```bash
-make release
-make test_release                         # 43/43
-scripts/golden-cookie-auth.sh             # 14/14
-scripts/golden-sql-roundtrip.sh           # all assertions
-```
-
-The new `/sql` golden test covers:
-
-- `OPTIONS /sql` CORS preflight.
-- Default NDJSON row mode.
-- NDJSON chunk mode.
-- One-shot JSON mode.
-- Missing `sql`, multi-statement reject, `__FLOCK_ADMIN__:` reject,
-  oversized body reject.
-- Invalid bearer reject.
-- Cookie auth after `/auth/login`.
-- Implicit params (`$1`) and typed wrapper params (`DECIMAL`, typed NULL).
-- Representative type encodings: BIGINT string, DECIMAL string,
-  INTERVAL object, BLOB base64, JSON text string.
-- Explicit SQL sessions: create, transaction state across requests,
-  delete, deleted-session 404.
-- `/auth/logout?destroy_sessions=true` destroys owned SQL sessions.
-
-Earlier live smoke on `127.0.0.1:19498` also manually confirmed:
-
-- `GET /info` → 204.
-- `POST /sql` simple NDJSON:
-  ```ndjson
-  {"type":"schema",...}
-  {"type":"row","values":[42,"hello"]}
-  {"type":"end","rowCount":1,"timeMs":0}
-  ```
-- `POST /sql` with `Accept: application/json` returned one-shot JSON.
-- Bad bearer token → 401.
-- Multi-statement request → 400.
-- `__FLOCK_ADMIN__:` request → 400.
-- `POST /sql/sessions/new` creates a session.
-- Session-bound transaction flow worked:
-  `BEGIN`, `CREATE TABLE`, `INSERT`, `SELECT count(*)`, `ROLLBACK`.
-- Parameterized session query worked:
-  `SELECT i FROM t WHERE i > $1` with `params:[1]`.
-- Type smoke for `DECIMAL`, `INTERVAL`, `DATE`, `BLOB` looked correct:
-  decimal string, interval object, date string, base64 blob.
-
-Issue discovered and fixed:
-
-- `DELETE /sql/sessions/:id` initially returned 404 because cpp-httplib's
-  `:id` path-param syntax is not actually used by `Server::Delete()`;
-  it routes through regex directly. Fixed locally with explicit regex
-  `^/sql/sessions/([^/]+)$` and `req.matches[1]`. Re-smoked: first
-  DELETE returns 200 JSON, second DELETE returns 404 `SESSION_NOT_FOUND`.
-
-Known smoke caveat:
-
-- The quick same-session concurrency smoke did not trigger 409 because
-  the first query finished too fast. Need a better test to hold the
-  session mutex long enough or skip 409 smoke until an integration test
-  can drive a genuinely slow query.
-
-## Remaining PR-5 tasks
-
-### Correctness fixes / cleanup
-
-1. Re-run live smoke after the DELETE regex fix:
-   - `POST /sql/sessions/new`
-   - `DELETE /sql/sessions/<sid>` should return 200 with JSON body.
-   - second delete should return 404 JSON envelope.
-
-2. Review `SqlHandlers` for rough edges:
-   - `PreparedStatement::GetExpectedParameterTypes()` handling for
-     named/non-positional parameters is basic. Verify with `$1`, `$2`.
-   - `is_select_statement = stmt_type == SELECT_STATEMENT` may classify
-     `EXPLAIN`, `DESCRIBE`, `SHOW`, or DML `RETURNING` too simplistically.
-     PR-5 can keep this minimal if tests cover the intended surface.
-   - One-shot JSON currently ignores `truncated`; streaming `end` has
-     `truncated:true`. Decide whether one-shot should include the flag.
-   - `SqlParamDecoder` is minimal, not a full JSON parser. Good enough
-     for PR-5 if tests cover request shapes we claim to support.
-
-3. Confirm `SqlChunkEncoder` APIs compile and behave for:
-   - `BIGINT` and `UBIGINT`
-   - `HUGEINT` and `UHUGEINT`
-   - `DECIMAL`
-   - `DOUBLE NaN/Infinity`
-   - `TIMESTAMP` vs `TIMESTAMPTZ`
-   - `INTERVAL`
-   - `BLOB`
-   - `JSON` column value as string
-   - `LIST`, `STRUCT`, `MAP`
-
-### Tests done
-
-- `scripts/golden-sql-roundtrip.sh` added and passing.
-- `test/sql/flock.test` extended with PR-5 setting defaults and now
-  passes 43 assertions.
-
-### Docs done / still needed
-
-- `AGENTS.md` PR-5 acceptance closure section added.
-- README implementation-status block updated: `/sql` works after PR-5.
-- No SPEC divergence intentionally introduced. If final review finds a
-  mismatch, prefer code changes over spec changes.
+Repo-wide grep on tracked files (excluding `duckdb/`,
+`extension-ci-tools/`, `misc/`, `build/`) for `flock|Flock|FLOCK|
+flock_session|X-Flock|__FLOCK|flock:|duckdb-flock`: zero hits.
 
 ### Commit / PR workflow
 
-Suggested local commit split:
-
-1. `PR-5 step 1/N: JSON writer + chunk encoder + param decoder`
-2. `PR-5 step 2/N: principal-owned sessions + SqlHandlers wiring`
-3. `PR-5 step 3/N: golden SQL tests + docs`
-
-Then:
+Single squash-friendly commit, branch off `main`, full 7-target CI
+matrix runs against the rename before merge.
 
 ```bash
-make release
-make test_release
-scripts/golden-cookie-auth.sh
-scripts/golden-sql-roundtrip.sh
-git push -u origin pr5-sql-endpoint
+git switch -c pr12-rename-harbor
+git add -A
+git commit -m "PR-12: rename duckdb-flock to duckdb-harbor"
+git push -u origin pr12-rename-harbor
 gh pr create ...
 ```
 
-As usual: wait for all 7 CI checks, do final GPT-5.5 spot-check, then
+Wait for all 7 CI checks + `architecture-guard` to go green, then
 squash-merge.
+
+## Up next: PR-6 (admin handlers)
+
+Per `AGENTS.md` Implementation roadmap, the next functional PR after
+the rename is PR-6 — admin handlers per SPEC §4:
+
+- `GET /whoami`
+- `GET /tables`
+- `GET /schema/:db/:table`
+- `POST /checkpoint`
+- `GET /sessions`
+- `POST /sessions/:sid/interrupt`
+- `POST /sql/cancel` (deferred from PR-5; needs admin authz)
+
+All routed through `harbor_authorization_function` with synthetic
+`__HARBOR_ADMIN__:<resource>:<action>` query strings (default-deny when
+no custom authz function is configured, unless
+`harbor_allow_admin_without_authz=true`).
+
+Path parameters MUST be identifier-escaped via
+`KeywordHelper::WriteQuoted(name, '"')` — never string-interpolated
+into SQL or into the `__HARBOR_ADMIN__:` policy string.
 
 ## Design decisions / caveats to preserve
 
@@ -297,55 +139,32 @@ squash-merge.
   httpfs sibling build and runtime.
 - Do not touch `src/quack/quack_message.{cpp,hpp}`.
 - Do not edit `misc/`.
-- Do not change `/quack` wire format. `test/sql/flock.test` roundtrip
+- Do not change `/quack` wire format. `test/sql/harbor.test` roundtrip
   is the regression baseline.
 - For streaming `/sql`, always buffer an entire NDJSON line or chunk
   before `sink.write()`.
 - Hold the session mutex for the full streaming lifetime.
 - Keep `ActiveRequestGuard` alive for the full streaming provider
   lifetime, not just the route lambda.
-- `/sql/cancel`, query-timeout enforcement, and admin endpoints remain
-  out of PR-5 scope.
-
-## GPT-5.5 context
-
-Persistent AI conversation id: `duckdb-flock-spec`.
-
-Latest relevant round:
-
-- **Round 15** (`/sql` design check, cost ~$0.32) confirmed:
-  - roll-own JSON writer is fine if tested hard;
-  - stream by DataChunk/provider-call;
-  - buffer-before-write;
-  - emit mid-stream errors in catch immediately;
-  - always prepare once, introspect param types, execute same prepared
-    statement;
-  - leave UiHandlers connection pool alone in PR-5;
-  - include `/sql` CORS preflight in PR-5;
-  - do not defer session ownership checks, 409, authz, or midstream
-    error records.
-- **Round 16** (`/sql` implementation review, cost ~$0.49) found real
-  pre-commit blockers:
-  - streaming catch only wrapped `Fetch()` and not encoder errors;
-  - `/sql` body cap happened after httplib had already buffered body;
-  - cookie-auth `/sql` lacked Origin/Referer CSRF gate;
-  - Mode B wrapper detection was key-order dependent;
-  - OPTIONS preflight did not cover `/sql/sessions/*`.
-- **Round 17** (`/sql` blocker-fix follow-up, cost ~$0.31) said the
-  blocker fixes were sufficient for implementation readiness pending
-  normal code review / CI. It also recommended defensive handling if
-  error-line encoding itself throws; that was implemented with
-  `EmitStreamingErrorSafe()`.
 
 ## If resuming after a reconnect
 
-1. `cd /Users/shreeve/Data/Code/duckdb-flock`
+1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
 2. `git status -sb`
-3. Confirm branch is `pr5-sql-endpoint`.
-4. Run:
+3. Confirm branch — `pr12-rename-harbor` if rename PR is still in flight,
+   `main` after merge.
+4. If rename PR is merged and you are starting PR-6, branch off latest
+   `main`:
+   ```bash
+   git switch main
+   git pull --ff-only
+   git switch -c pr6-admin-handlers
+   ```
+5. Run:
    ```bash
    make release
    make test_release
+   scripts/golden-cookie-auth.sh
+   scripts/golden-sql-roundtrip.sh
    ```
-5. Re-run the `/sql` live smoke, especially session DELETE.
-6. Continue with tests + docs.
+6. Confirm all green before starting new work.

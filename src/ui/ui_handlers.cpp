@@ -11,14 +11,14 @@
 //
 // What's new / refactored:
 //   - No singleton, no atexit, no Run() / Start() / Stop() lifecycle
-//   - No embedded duckdb_httplib_openssl::Server (lives on FlockHttpServer)
+//   - No embedded duckdb_httplib_openssl::Server (lives on HarborHttpServer)
 //   - Constructor builds the allowed-origins set (per GPT-5.5 round 9
 //     catch #4 — single-string Origin check breaks for non-loopback bind)
 //   - SSE handler uses shared_ptr<ActiveRequestGuard> captured by the
 //     chunked content provider closure (per GPT-5.5 round 9 catch on
 //     ActiveRequestGuard lifetime — stack-local guard would die before
 //     the provider runs)
-//   - Shutdown() method called by FlockHttpServer::Close() before the
+//   - Shutdown() method called by HarborHttpServer::Close() before the
 //     active-request drain (per GPT-5.5 round 9 catch #1)
 
 #include "ui_handlers.hpp"
@@ -34,9 +34,9 @@
 #include "version.hpp"
 #include "watcher.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_crypto.hpp"
-#include "flock_http_server.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_crypto.hpp"
+#include "harbor_http_server.hpp"
 
 #include "duckdb/main/config.hpp"
 
@@ -65,13 +65,13 @@ const char *UiHandlers::UiExtensionVersion() {
 	return UI_EXTENSION_VERSION;
 }
 
-UiHandlers::UiHandlers(FlockHttpServer &server_p, AuthManager &auth_p, weak_ptr<DatabaseInstance> db_p,
+UiHandlers::UiHandlers(HarborHttpServer &server_p, AuthManager &auth_p, weak_ptr<DatabaseInstance> db_p,
                        ClientContext &context)
     : server(server_p), auth(auth_p), ddb_instance(std::move(db_p)) {
 	remote_url = GetRemoteUrl(context);
 	allowed_origins = ComputeAllowedOrigins();
 	local_url_prefix = ComputeLocalUrlPrefix();
-	user_agent = StringUtil::Format("flock-ui/%s-%s(%s)", DuckDB::LibraryVersion(), UI_EXTENSION_VERSION,
+	user_agent = StringUtil::Format("harbor-ui/%s-%s(%s)", DuckDB::LibraryVersion(), UI_EXTENSION_VERSION,
 	                                DuckDB::Platform());
 	polling_interval_ms = GetPollingInterval(context);
 
@@ -85,7 +85,7 @@ UiHandlers::UiHandlers(FlockHttpServer &server_p, AuthManager &auth_p, weak_ptr<
 
 UiHandlers::~UiHandlers() {
 	// Defensive — Shutdown() should have been called by
-	// FlockHttpServer::Close() already, but cover the path where
+	// HarborHttpServer::Close() already, but cover the path where
 	// UiHandlers is destroyed without Close() being called (e.g.,
 	// construction failure mid-RegisterBuiltinHandlers).
 	Shutdown();
@@ -162,7 +162,7 @@ bool UiHandlers::LocalDevMode() const {
 	}
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(*db);
-	if (!config.TryGetCurrentSetting("flock_local_dev_mode", setting_val) || setting_val.IsNull()) {
+	if (!config.TryGetCurrentSetting("harbor_local_dev_mode", setting_val) || setting_val.IsNull()) {
 		return false;
 	}
 	try {
@@ -174,17 +174,17 @@ bool UiHandlers::LocalDevMode() const {
 
 namespace {
 
-// Synthetic principal id used when flock_local_dev_mode bypasses
-// real authentication. Derived as sha256("__FLOCK_LOCAL_DEV__") so
+// Synthetic principal id used when harbor_local_dev_mode bypasses
+// real authentication. Derived as sha256("__HARBOR_LOCAL_DEV__") so
 // it has the same shape (64 lowercase hex chars) as a real
 // principal_id and the connection-pool keying logic doesn't need
 // to special-case it.
 const std::string &LocalDevPrincipalId() {
-	static const std::string id = duckdb::flock_crypto::Sha256Hex("__FLOCK_LOCAL_DEV__");
+	static const std::string id = duckdb::harbor_crypto::Sha256Hex("__HARBOR_LOCAL_DEV__");
 	return id;
 }
 
-// Minimal flock login page. Inline HTML+CSS+JS so we don't need a
+// Minimal harbor login page. Inline HTML+CSS+JS so we don't need a
 // separate asset pipeline. The page POSTs the user-pasted token to
 // /auth/login as JSON; on 200 it does window.location.reload() so
 // the cookie-bearing reload hits the cookie-gated catch-all and
@@ -193,12 +193,12 @@ const std::string &LocalDevPrincipalId() {
 // Kept deliberately minimal: no external deps, no fonts, no
 // frameworks. ~70 lines total. Substantive UX work (token rotation,
 // multi-user, etc.) is post-v0.1 (SPEC §15 q4).
-const char *kFlockLoginPage = R"FLOCK(<!doctype html>
+const char *kHarborLoginPage = R"HARBOR(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>flock — Sign in</title>
+<title>harbor — Sign in</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, Segoe UI, sans-serif;
@@ -229,8 +229,8 @@ const char *kFlockLoginPage = R"FLOCK(<!doctype html>
 </head>
 <body>
 <form class="card" id="f">
-  <h1>flock</h1>
-  <p>Paste the token printed by <code>flock_serve()</code>.</p>
+  <h1>harbor</h1>
+  <p>Paste the token printed by <code>harbor_serve()</code>.</p>
   <label for="t">Token</label>
   <input id="t" type="password" autocomplete="off" required autofocus>
   <button id="b" type="submit">Sign in</button>
@@ -256,7 +256,7 @@ const char *kFlockLoginPage = R"FLOCK(<!doctype html>
 </script>
 </body>
 </html>
-)FLOCK";
+)HARBOR";
 
 } // namespace
 
@@ -276,16 +276,16 @@ std::string UiHandlers::ScopedConnectionKey(const std::string &principal_id, con
 }
 
 AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool require_origin_allowed) {
-	// Try the standard cookie/bearer/X-Flock-Token path. We pass a
-	// synthetic session id ("__FLOCK_AUTH__:ddb") so per-request
+	// Try the standard cookie/bearer/X-Harbor-Token path. We pass a
+	// synthetic session id ("__HARBOR_AUTH__:ddb") so per-request
 	// authz hooks can pattern-match on it if needed; AuthManager
 	// only uses it for prepared-statement parameter binding.
-	auto result = auth.AuthenticateRequest(req, "__FLOCK_AUTH__:ddb");
+	auto result = auth.AuthenticateRequest(req, "__HARBOR_AUTH__:ddb");
 	if (result.ok) {
 		return result;
 	}
 	// Local-dev escape — only when ALL of:
-	//   - flock_local_dev_mode = true
+	//   - harbor_local_dev_mode = true
 	//   - bind host is loopback
 	//   - (if require_origin_allowed) the request's Origin is in
 	//     our allowed-origins set
@@ -404,7 +404,7 @@ void UiHandlers::HandleGetLocalToken(const httplib::Request &req, httplib::Respo
 
 void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &res) {
 	// PR-4: cookie-gated catch-all. Without a valid credential:
-	//   - GET /  → serve the flock login page (200 text/html). The
+	//   - GET /  → serve the harbor login page (200 text/html). The
 	//     page POSTs to /auth/login and reloads on success.
 	//   - GET /anything-else → 401 plain text. Never proxy assets
 	//     for an unauthenticated client; that would let the upstream
@@ -413,7 +413,7 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 	if (!authn.ok) {
 		if (req.path == "/" || req.path.empty()) {
 			res.status = 200;
-			res.set_content(kFlockLoginPage, "text/html; charset=utf-8");
+			res.set_content(kHarborLoginPage, "text/html; charset=utf-8");
 		} else {
 			res.status = 401;
 			res.set_content("Unauthorized — sign in at /\n", "text/plain; charset=utf-8");
@@ -434,22 +434,22 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 	// from a strict allow-list of safe asset-fetch headers. Pre-PR-4
 	// this code forwarded the entire Cookie header so MotherDuck's
 	// domain cookies could pass through to ui.duckdb.org. PR-4 added
-	// our own flock_session=v1.<principal_hex>... cookie under flock's
-	// origin; the browser sends it on every request to flock for any
+	// our own harbor_session=v1.<principal_hex>... cookie under harbor's
+	// origin; the browser sends it on every request to harbor for any
 	// path, including /assets/*, and the old passthrough would forward
-	// it verbatim to ui.duckdb.org — leaking flock auth material to a
+	// it verbatim to ui.duckdb.org — leaking harbor auth material to a
 	// third party.
 	//
-	// Hard rule: we forward NO request header that could carry flock
+	// Hard rule: we forward NO request header that could carry harbor
 	// auth material. Specifically NEVER:
-	//   - Cookie               (would leak flock_session)
+	//   - Cookie               (would leak harbor_session)
 	//   - Authorization        (would leak Bearer token)
-	//   - X-Flock-Token        (would leak token via flock-specific header)
-	//   - X-Flock-Session-Id   (future SQL session id)
+	//   - X-Harbor-Token        (would leak token via harbor-specific header)
+	//   - X-Harbor-Session-Id   (future SQL session id)
 	//   - Sec-* fetch metadata (browser-internal; not relevant upstream)
 	//
 	// The allow-list intentionally omits Origin too — sending it would
-	// expose the user's local flock URL (e.g. http://localhost:9494) to
+	// expose the user's local harbor URL (e.g. http://localhost:9494) to
 	// upstream and could cause upstream to issue different content based
 	// on the local host name, neither of which we want.
 	//
@@ -862,7 +862,7 @@ void UiHandlers::Register(duckdb_httplib_openssl::Server &http) {
 			res.status = 401;
 			return;
 		}
-		auto guard = std::make_shared<FlockHttpServer::ActiveRequestGuard>(self->server);
+		auto guard = std::make_shared<HarborHttpServer::ActiveRequestGuard>(self->server);
 		res.set_chunked_content_provider("text/event-stream",
 		                                  [self, guard](size_t /* offset */, httplib::DataSink &sink) -> bool {
 			                                  if (self->event_dispatcher && self->event_dispatcher->WaitEvent(&sink)) {
@@ -875,36 +875,36 @@ void UiHandlers::Register(duckdb_httplib_openssl::Server &http) {
 
 	// /localToken — Referer + loopback gated.
 	http.Get("/localToken", [self](const httplib::Request &req, httplib::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		self->HandleGetLocalToken(req, res);
 	});
 
 	// /ddb/interrupt — Origin-checked.
 	http.Post("/ddb/interrupt", [self](const httplib::Request &req, httplib::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		self->HandleInterrupt(req, res);
 	});
 
 	// /ddb/run — Origin-checked. Binary protocol via BinarySerializer.
 	http.Post("/ddb/run", [self](const httplib::Request &req, httplib::Response &res,
 	                              const httplib::ContentReader &content_reader) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		self->HandleRun(req, res, content_reader);
 	});
 
 	// /ddb/tokenize — Origin-checked. Binary protocol.
 	http.Post("/ddb/tokenize", [self](const httplib::Request &req, httplib::Response &res,
 	                                   const httplib::ContentReader &content_reader) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		self->HandleTokenize(req, res, content_reader);
 	});
 
 	// GET /.* catch-all proxy. MUST be the LAST route registered (cpp-httplib
 	// resolves in registration order — catch-all would shadow earlier
-	// routes). Caller (FlockHttpServer::RegisterBuiltinHandlers)
+	// routes). Caller (HarborHttpServer::RegisterBuiltinHandlers)
 	// invokes UiHandlers::Register AFTER QuackHandlers and AdminHandlers.
 	http.Get("/.*", [self](const httplib::Request &req, httplib::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		self->HandleProxyGet(req, res);
 	});
 }

@@ -8,10 +8,10 @@
 
 #include "sql_handlers.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_crypto.hpp"
-#include "flock_http_server.hpp"
-#include "flock_session.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_crypto.hpp"
+#include "harbor_http_server.hpp"
+#include "harbor_session.hpp"
 #include "sql_chunk_encoder.hpp"
 #include "sql_json_writer.hpp"
 #include "sql_param_decoder.hpp"
@@ -37,7 +37,7 @@ namespace duckdb {
 
 namespace {
 
-namespace fjs = duckdb::flock_sql;
+namespace fjs = duckdb::harbor_sql;
 
 constexpr size_t kDefaultMaxBodyBytes = 268435456; // 256 MiB; matches SPEC §6 default
 
@@ -152,7 +152,7 @@ bool IsJsonContentType(const string &content_type) {
 	return lower == "application/json" || StringUtil::StartsWith(lower, "application/json;");
 }
 
-bool IsSameOriginAllowed(const FlockHttpServer &server, const string &origin) {
+bool IsSameOriginAllowed(const HarborHttpServer &server, const string &origin) {
 	if (origin.empty()) {
 		return false;
 	}
@@ -170,7 +170,7 @@ bool IsSameOriginAllowed(const FlockHttpServer &server, const string &origin) {
 	return false;
 }
 
-bool HasAllowedBrowserOrigin(const FlockHttpServer &server, AuthManager &auth,
+bool HasAllowedBrowserOrigin(const HarborHttpServer &server, AuthManager &auth,
                              const duckdb_httplib_openssl::Request &req) {
 	auto origin = req.get_header_value("Origin");
 	if (!origin.empty()) {
@@ -204,7 +204,7 @@ bool ReadRequestBodyWithLimit(const duckdb_httplib_openssl::ContentReader &conte
 		}
 		if (out.size() + data_length > max_body) {
 			too_large = true;
-			error = StringUtil::Format("request body exceeds flock_max_request_body_bytes=%llu",
+			error = StringUtil::Format("request body exceeds harbor_max_request_body_bytes=%llu",
 			                           (unsigned long long)max_body);
 			return false;
 		}
@@ -238,7 +238,7 @@ void ApplyCors(AuthManager &auth, const duckdb_httplib_openssl::Request &req,
 struct SessionResolution {
 	bool ok = false;
 	bool ephemeral = false;             // true iff no sessionId provided; caller creates a fresh local Connection
-	shared_ptr<FlockSession> session;   // populated iff !ephemeral && ok
+	shared_ptr<HarborSession> session;   // populated iff !ephemeral && ok
 	string error_code;
 	string message;
 	int status = 0;
@@ -274,8 +274,8 @@ SessionResolution ResolveSession(SessionManager &sessions, const string &session
 // streaming response body"). The lock_guard is moved into the struct
 // at request-handler entry; released only when the struct is destroyed.
 struct StreamingCtx {
-	std::shared_ptr<FlockHttpServer::ActiveRequestGuard> guard; // request-counted for drain
-	shared_ptr<FlockSession> session;                            // null in ephemeral mode
+	std::shared_ptr<HarborHttpServer::ActiveRequestGuard> guard; // request-counted for drain
+	shared_ptr<HarborSession> session;                            // null in ephemeral mode
 	unique_ptr<Connection> ephemeral_connection;                 // populated in ephemeral mode
 	std::unique_lock<mutex> session_lock;                        // holds the session mutex (non-ephemeral)
 	unique_ptr<QueryResult> result;
@@ -316,7 +316,7 @@ void EmitStreamingErrorSafe(StreamingCtx &ctx, duckdb_httplib_openssl::DataSink 
 
 // ---------- ctor / dtor ----------
 
-SqlHandlers::SqlHandlers(FlockHttpServer &server_p, AuthManager &auth_p, SessionManager &sessions_p,
+SqlHandlers::SqlHandlers(HarborHttpServer &server_p, AuthManager &auth_p, SessionManager &sessions_p,
                          weak_ptr<DatabaseInstance> db_p)
     : server(server_p), auth(auth_p), sessions(sessions_p), db(std::move(db_p)) {
 }
@@ -328,7 +328,7 @@ SqlHandlers::~SqlHandlers() = default;
 void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
                               duckdb_httplib_openssl::Response &res,
                               const duckdb_httplib_openssl::ContentReader &content_reader) {
-	FlockHttpServer::ActiveRequestGuard sync_guard(server);
+	HarborHttpServer::ActiveRequestGuard sync_guard(server);
 	ApplyCors(auth, req, res);
 
 	if (!IsJsonContentType(req.get_header_value("Content-Type"))) {
@@ -338,9 +338,9 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 
 	// Body size guard while streaming request bytes from httplib. Do
 	// NOT rely on req.body.size(): by then httplib has already buffered
-	// the full body, which defeats flock_max_request_body_bytes as a
+	// the full body, which defeats harbor_max_request_body_bytes as a
 	// memory DoS guard (round-16 GPT-5.5 catch).
-	auto max_body = ReadUbigintSetting(db, "flock_max_request_body_bytes", kDefaultMaxBodyBytes);
+	auto max_body = ReadUbigintSetting(db, "harbor_max_request_body_bytes", kDefaultMaxBodyBytes);
 	string body;
 	string body_error;
 	if (!ReadRequestBodyWithLimit(content_reader, max_body, body, body_error)) {
@@ -355,19 +355,19 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 
-	// Allow X-Flock-Session-Id header as alternative to body's sessionId.
+	// Allow X-Harbor-Session-Id header as alternative to body's sessionId.
 	if (parsed.session_id.empty()) {
-		auto h = req.get_header_value("X-Flock-Session-Id");
+		auto h = req.get_header_value("X-Harbor-Session-Id");
 		if (!h.empty()) {
 			parsed.session_id = h;
 		}
 	}
 
-	// SPEC §7: reject __FLOCK_ADMIN__:* synthetic admin SQL from clients.
+	// SPEC §7: reject __HARBOR_ADMIN__:* synthetic admin SQL from clients.
 	string trimmed_sql = parsed.sql;
 	StringUtil::Trim(trimmed_sql);
-	if (StringUtil::StartsWith(trimmed_sql, "__FLOCK_ADMIN__:")) {
-		RespondError(res, 400, "BAD_REQUEST", "SQL must not begin with __FLOCK_ADMIN__: (reserved prefix)");
+	if (StringUtil::StartsWith(trimmed_sql, "__HARBOR_ADMIN__:")) {
+		RespondError(res, 400, "BAD_REQUEST", "SQL must not begin with __HARBOR_ADMIN__: (reserved prefix)");
 		return;
 	}
 
@@ -379,9 +379,9 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	}
 	// Cookie-authenticated SQL execution is browser-origin sensitive:
 	// SameSite=Strict is helpful but not our only CSRF control. Require
-	// same-origin or an entry in flock_cors_origins whenever the
-	// credential source is the ambient flock_session cookie. Explicit
-	// Bearer/X-Flock-Token clients are not browser-ambient and don't
+	// same-origin or an entry in harbor_cors_origins whenever the
+	// credential source is the ambient harbor_session cookie. Explicit
+	// Bearer/X-Harbor-Token clients are not browser-ambient and don't
 	// need this Origin gate.
 	if (authn.source == AuthSource::kCookie && !HasAllowedBrowserOrigin(server, auth, req)) {
 		RespondError(res, 403, "FORBIDDEN", "cookie-authenticated /sql requests require an allowed Origin or Referer");
@@ -572,7 +572,7 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 
 	// One-shot JSON path: materialize everything into a single JSON object.
 	if (shape == ResponseShape::kOneShotJson) {
-		auto max_rows = ReadUbigintSetting(db, "flock_max_response_rows", 0);
+		auto max_rows = ReadUbigintSetting(db, "harbor_max_response_rows", 0);
 		vector<unique_ptr<DataChunk>> all_chunks;
 		idx_t row_count = 0;
 		bool truncated = false;
@@ -625,7 +625,7 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	// outlives the route lambda. ActiveRequestGuard + session_lock both
 	// MOVED into the ctx so they live for the full streaming duration.
 	auto ctx = std::make_shared<StreamingCtx>();
-	ctx->guard = std::make_shared<FlockHttpServer::ActiveRequestGuard>(server);
+	ctx->guard = std::make_shared<HarborHttpServer::ActiveRequestGuard>(server);
 	ctx->session = resolved.ephemeral ? nullptr : resolved.session;
 	ctx->ephemeral_connection = std::move(ephemeral_conn);
 	ctx->session_lock = std::move(session_lock);
@@ -633,7 +633,7 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	ctx->encoder = std::move(encoder);
 	ctx->session_id_for_response = parsed.session_id;
 	ctx->started_at = started_at;
-	ctx->max_rows = ReadUbigintSetting(db, "flock_max_response_rows", 0);
+	ctx->max_rows = ReadUbigintSetting(db, "harbor_max_response_rows", 0);
 	ctx->chunk_mode = (shape == ResponseShape::kNdjsonChunkMode);
 
 	res.status = 200;
@@ -736,7 +736,7 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 
 void SqlHandlers::HandleSessionNew(const duckdb_httplib_openssl::Request &req,
                                      duckdb_httplib_openssl::Response &res) {
-	FlockHttpServer::ActiveRequestGuard guard(server);
+	HarborHttpServer::ActiveRequestGuard guard(server);
 	ApplyCors(auth, req, res);
 
 	auto authn = AuthenticateForSql(auth, req, kAdminSessionId);
@@ -769,7 +769,7 @@ void SqlHandlers::HandleSessionNew(const duckdb_httplib_openssl::Request &req,
 
 void SqlHandlers::HandleSessionDelete(const duckdb_httplib_openssl::Request &req,
                                         duckdb_httplib_openssl::Response &res) {
-	FlockHttpServer::ActiveRequestGuard guard(server);
+	HarborHttpServer::ActiveRequestGuard guard(server);
 	ApplyCors(auth, req, res);
 
 	auto authn = AuthenticateForSql(auth, req, kAdminSessionId);

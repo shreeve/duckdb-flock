@@ -37,7 +37,7 @@ namespace duckdb {
 class ClientContext;
 class LogicalType;
 
-namespace flock_sql {
+namespace harbor_sql {
 
 struct DecodedParams {
 	// duckdb::vector (a public subclass of std::vector) is required so
@@ -105,5 +105,5 @@ private:
 	bool ParseRawValue(const std::string &json, std::size_t &pos, std::string &raw_out, std::string &error);
 };
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

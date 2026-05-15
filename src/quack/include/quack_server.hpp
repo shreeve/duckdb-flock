@@ -7,14 +7,14 @@
 //   - class QuackServer                 (base; session pool + auth + dispatch)
 //   - class HttpQuackServer : QuackServer (concrete; owned httplib::Server)
 //
-// flock has:
-//   - struct FlockSession   (in src/include/flock_session.hpp)
-//   - class SessionManager  (in src/include/flock_session.hpp)
-//   - class AuthManager     (in src/include/flock_auth.hpp)
-//   - class FlockHttpServer (in src/include/flock_http_server.hpp;
+// harbor has:
+//   - struct HarborSession   (in src/include/harbor_session.hpp)
+//   - class SessionManager  (in src/include/harbor_session.hpp)
+//   - class AuthManager     (in src/include/harbor_auth.hpp)
+//   - class HarborHttpServer (in src/include/harbor_http_server.hpp;
 //                            owns the only duckdb_httplib::Server)
 //   - class QuackHandlers   (declared here; registers /quack routes
-//                            against the shared FlockHttpServer)
+//                            against the shared HarborHttpServer)
 //
 // QuackHandlers is the only class that survives from upstream's server
 // hierarchy, and even it loses its httplib::Server ownership. The
@@ -24,35 +24,35 @@
 //
 // The wire format on /quack is byte-identical to upstream Quack — only
 // the C++ wiring around it changed. The PR-1.5 roundtrip test in
-// test/sql/flock.test verifies this end-to-end.
+// test/sql/harbor.test verifies this end-to-end.
 
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 
-// Match FlockHttpServer's openssl-enabled cpp-httplib (see header
-// comment in flock_http_server.hpp explaining the namespace migration).
+// Match HarborHttpServer's openssl-enabled cpp-httplib (see header
+// comment in harbor_http_server.hpp explaining the namespace migration).
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 namespace duckdb {
 
 class DatabaseInstance;
-class FlockHttpServer;
+class HarborHttpServer;
 class SessionManager;
 class AuthManager;
 class QuackMessage;
 class MemoryStream;
-struct FlockSession;
+struct HarborSession;
 
 // QuackHandlers — registers /quack and OPTIONS /quack routes against
-// the shared FlockHttpServer. Owns no httplib::Server, no listener
+// the shared HarborHttpServer. Owns no httplib::Server, no listener
 // thread, no session pool, no auth state — those all live on
-// FlockHttpServer / SessionManager / AuthManager.
+// HarborHttpServer / SessionManager / AuthManager.
 class QuackHandlers {
 public:
 	static constexpr const idx_t QUACK_VERSION = 1;
 
-	QuackHandlers(FlockHttpServer &server, SessionManager &sessions, AuthManager &auth,
+	QuackHandlers(HarborHttpServer &server, SessionManager &sessions, AuthManager &auth,
 	              weak_ptr<DatabaseInstance> db);
 	~QuackHandlers();
 
@@ -60,11 +60,11 @@ public:
 	QuackHandlers &operator=(const QuackHandlers &) = delete;
 
 	// Register OPTIONS /quack and POST /quack against the given
-	// httplib server. Must be called between FlockHttpServer::Bind()
-	// and FlockHttpServer::StartListening().
+	// httplib server. Must be called between HarborHttpServer::Bind()
+	// and HarborHttpServer::StartListening().
 	//
 	// Note: GET / (the upstream landing page) is NOT registered —
-	// SPEC §4 reserves GET / for the future flock login wrapper that
+	// SPEC §4 reserves GET / for the future harbor login wrapper that
 	// arrives in PR-4.
 	void Register(duckdb_httplib_openssl::Server &server);
 
@@ -80,12 +80,12 @@ private:
 	// GPT-5.5 round 5 catch #2: keep the owning shared_ptr through
 	// the request so a concurrent disconnect can't dangle the handler).
 	unique_ptr<QuackMessage> HandleMessageInternal(DatabaseInstance &db, QuackMessage &received_message,
-	                                               shared_ptr<FlockSession> session);
+	                                               shared_ptr<HarborSession> session);
 
-	// Borrowed references; lifetimes managed by FlockHttpServer (which
-	// owns this object as well as the subsystems). FlockHttpServer's
+	// Borrowed references; lifetimes managed by HarborHttpServer (which
+	// owns this object as well as the subsystems). HarborHttpServer's
 	// dtor must drain in-flight requests before destroying handlers.
-	FlockHttpServer &server;
+	HarborHttpServer &server;
 	SessionManager &sessions;
 	AuthManager &auth;
 	weak_ptr<DatabaseInstance> db;

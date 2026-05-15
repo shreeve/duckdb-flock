@@ -30,7 +30,7 @@
 #include <utility>
 
 namespace duckdb {
-namespace flock_sql {
+namespace harbor_sql {
 
 namespace {
 
@@ -832,5 +832,5 @@ DecodedParams SqlParamDecoder::Decode(const std::string &params_json,
 	return result;
 }
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

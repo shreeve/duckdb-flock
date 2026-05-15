@@ -2,26 +2,26 @@
 
 // UiHandlers — registers DuckDB UI routes (/info, /localEvents,
 // /localToken, /ddb/*, GET /.* proxy) against the shared
-// FlockHttpServer. Replaces upstream duckdb-ui's HttpServer class:
+// HarborHttpServer. Replaces upstream duckdb-ui's HttpServer class:
 //
 //   - Drops the singleton pattern (server_instance, atexit,
 //     Started/Start/Stop/IsRunningOnMachine, GetInstance).
 //   - Drops the embedded duckdb_httplib_openssl::Server and listener
-//     thread (those live on FlockHttpServer now, per PR-2's
+//     thread (those live on HarborHttpServer now, per PR-2's
 //     architecture).
 //   - Keeps the route handler bodies (HandleGetInfo et al.) verbatim
 //     where reasonable.
 //   - Owns the long-running EventDispatcher + Watcher that push
 //     "catalog changed" events to /localEvents SSE clients.
 //
-// Lifecycle (called by FlockHttpServer::RegisterBuiltinHandlers and
-// FlockHttpServer::Close):
+// Lifecycle (called by HarborHttpServer::RegisterBuiltinHandlers and
+// HarborHttpServer::Close):
 //
 //   ui_handlers = make_uniq<UiHandlers>(*this, db, context);
 //   ui_handlers->Register(server);   // registers routes + starts Watcher
 //   ...
 //   ui_handlers->Shutdown();         // stops Watcher + closes EventDispatcher
-//                                    // (called from FlockHttpServer::Close()
+//                                    // (called from HarborHttpServer::Close()
 //                                    // BEFORE the active-request drain — the
 //                                    // Watcher thread isn't request-scoped)
 //
@@ -31,13 +31,13 @@
 //     - Origin must match an entry in our local-allowed set
 //       ({localhost, 127.0.0.1, [::1]} plus the bind host if not
 //       0.0.0.0). CSRF defence.
-//     - AND a valid auth credential: flock_session cookie OR
-//       Authorization: Bearer / X-Flock-Token. AuthManager runs
-//       flock_authentication_function for explicit-bearer paths;
+//     - AND a valid auth credential: harbor_session cookie OR
+//       Authorization: Bearer / X-Harbor-Token. AuthManager runs
+//       harbor_authentication_function for explicit-bearer paths;
 //       cookie verify is HMAC-only.
-//     - Local-dev bypass: flock_local_dev_mode=true + loopback bind
+//     - Local-dev bypass: harbor_local_dev_mode=true + loopback bind
 //       + Origin in allowed_origins → use the synthetic principal
-//       sha256("__FLOCK_LOCAL_DEV__") so connection-pool keying still
+//       sha256("__HARBOR_LOCAL_DEV__") so connection-pool keying still
 //       behaves like every other authenticated path.
 //
 //   /localToken: Referer must start with our local URL AND the bind
@@ -47,7 +47,7 @@
 //
 //   GET /.* (catch-all UI proxy, PR-4):
 //     - Valid cookie/bearer OR local-dev mode → proxy to remote_url.
-//     - No valid cookie + GET /  → minimal flock login page (200).
+//     - No valid cookie + GET /  → minimal harbor login page (200).
 //     - No valid cookie + any other GET → 401 (assets shouldn't
 //       leak from a non-authenticated proxy).
 //
@@ -73,8 +73,8 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 
-// Match FlockHttpServer's openssl-enabled cpp-httplib (see header
-// comment in src/include/flock_http_server.hpp explaining the namespace
+// Match HarborHttpServer's openssl-enabled cpp-httplib (see header
+// comment in src/include/harbor_http_server.hpp explaining the namespace
 // migration).
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
@@ -83,7 +83,7 @@ namespace duckdb {
 
 class DatabaseInstance;
 class ClientContext;
-class FlockHttpServer;
+class HarborHttpServer;
 class AuthManager;
 struct AuthResult;
 struct HTTPParams;
@@ -96,14 +96,14 @@ class Watcher;
 
 class UiHandlers {
 public:
-	UiHandlers(FlockHttpServer &server, AuthManager &auth, weak_ptr<DatabaseInstance> db, ClientContext &context);
+	UiHandlers(HarborHttpServer &server, AuthManager &auth, weak_ptr<DatabaseInstance> db, ClientContext &context);
 	~UiHandlers();
 
 	UiHandlers(const UiHandlers &) = delete;
 	UiHandlers &operator=(const UiHandlers &) = delete;
 
 	// Register routes against the shared httplib server. Must be
-	// called between FlockHttpServer::Bind() and StartListening().
+	// called between HarborHttpServer::Bind() and StartListening().
 	// Also starts the Watcher (which polls the DuckDB catalog and
 	// pushes "catalog changed" events to /localEvents SSE clients).
 	//
@@ -121,14 +121,14 @@ public:
 	//
 	// The catch-all GET /.* must be the LAST route registered against
 	// the server (cpp-httplib resolves in registration order). Caller
-	// (FlockHttpServer::RegisterBuiltinHandlers) is responsible for
+	// (HarborHttpServer::RegisterBuiltinHandlers) is responsible for
 	// calling UiHandlers::Register() AFTER all other handler subsystems'
 	// Register() calls.
 	void Register(duckdb_httplib_openssl::Server &server);
 
 	// Stop the Watcher thread and close the EventDispatcher (which
 	// wakes any /localEvents SSE consumers blocked in WaitEvent).
-	// Called by FlockHttpServer::Close() before draining active
+	// Called by HarborHttpServer::Close() before draining active
 	// requests. Idempotent.
 	void Shutdown();
 
@@ -166,18 +166,18 @@ private:
 	// /localToken returns 404 unless this is true.
 	bool IsBoundLocally() const;
 
-	// True iff the flock_local_dev_mode setting is true. Read on each
+	// True iff the harbor_local_dev_mode setting is true. Read on each
 	// call rather than memoized so operators can flip it at runtime
-	// (e.g. via `SET GLOBAL flock_local_dev_mode = true`).
+	// (e.g. via `SET GLOBAL harbor_local_dev_mode = true`).
 	bool LocalDevMode() const;
 
 	// Authenticate a UI request. Returns the AuthResult from
-	// AuthManager (cookie/bearer/X-Flock-Token), with one local-dev
+	// AuthManager (cookie/bearer/X-Harbor-Token), with one local-dev
 	// override:
 	//   if AuthenticateRequest fails, AND LocalDevMode() is true,
 	//   AND IsBoundLocally(), AND require_origin_allowed implies
 	//   IsAllowedOrigin(req.Origin), THEN return ok=true with
-	//   principal_id = sha256("__FLOCK_LOCAL_DEV__") and
+	//   principal_id = sha256("__HARBOR_LOCAL_DEV__") and
 	//   source = AuthSource::kLocalDev. The synthetic principal
 	//   keeps the connection-pool keying invariant alive even with
 	//   local-dev bypass active (round-11 review).
@@ -203,7 +203,7 @@ private:
 	std::string ComputeLocalUrlPrefix() const;
 
 	// ---- Members ----
-	FlockHttpServer &server;
+	HarborHttpServer &server;
 	AuthManager &auth;
 	weak_ptr<DatabaseInstance> ddb_instance;
 

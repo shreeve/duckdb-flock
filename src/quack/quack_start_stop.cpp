@@ -1,19 +1,19 @@
 // PR-2 refactor of upstream duckdb-quack's quack_start_stop.cpp.
 //
 // quack_serve / quack_stop are kept as thin shims that delegate to
-// FlockServerState::Global() (per AGENTS.md "Implementation roadmap":
-// quack_* SQL functions stay as functional aliases of flock_*).
+// HarborServerState::Global() (per AGENTS.md "Implementation roadmap":
+// quack_* SQL functions stay as functional aliases of harbor_*).
 //
 // quack_server_list adapts to single-server-per-process — at most one
-// row in the result. SPEC §9 lists `flock_status()` as the eventual
-// flock-side replacement; for PR-2 we keep quack_server_list working
+// row in the result. SPEC §9 lists `harbor_status()` as the eventual
+// harbor-side replacement; for PR-2 we keep quack_server_list working
 // as the introspection surface so existing tooling doesn't break.
 
 #include "duckdb/main/database.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_http_server.hpp"
-#include "flock_session.hpp" // SessionManager full definition for ActiveCount() in QuackServerList
+#include "harbor_auth.hpp"
+#include "harbor_http_server.hpp"
+#include "harbor_session.hpp" // SessionManager full definition for ActiveCount() in QuackServerList
 #include "quack_startstop.hpp"
 
 using namespace duckdb;
@@ -81,9 +81,9 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 	}
 
 	// PR-2: was QuackStorageExtensionInfo::GetState(*context.db).CreateServer(...).
-	// Now delegates to the process-global FlockServerState. Single-server-per-process
+	// Now delegates to the process-global HarborServerState. Single-server-per-process
 	// per SPEC §2 — a second quack_serve while one is running throws.
-	FlockServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
+	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
@@ -125,7 +125,7 @@ static void QuackStop(ClientContext & /* context */, TableFunctionInput &data_p,
 	if (bind_data.finished) {
 		return;
 	}
-	if (FlockServerState::Global().Stop(bind_data.listen_uri)) {
+	if (HarborServerState::Global().Stop(bind_data.listen_uri)) {
 		output.data[0].SetValue(0, StringUtil::Format("Stopped listening on %s", bind_data.listen_uri.Uri()));
 	} else {
 		output.data[0].SetValue(0, StringUtil::Format("No server found listening on %s", bind_data.listen_uri.Uri()));
@@ -171,7 +171,7 @@ static void QuackServerList(ClientContext & /* context */, TableFunctionInput &d
 
 	// Single-server-per-process: at most one row.
 	idx_t row = 0;
-	FlockServerState::Global().WithCurrent([&](FlockHttpServer &srv) {
+	HarborServerState::Global().WithCurrent([&](HarborHttpServer &srv) {
 		auto &uri = srv.ListenUri();
 		output.SetValue(0, row, Value(uri.Uri()));
 		output.SetValue(1, row, Value(uri.Http()));

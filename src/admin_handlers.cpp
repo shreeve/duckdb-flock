@@ -1,7 +1,7 @@
 #include "admin_handlers.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_http_server.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_http_server.hpp"
 #include "ui_handlers.hpp" // ui::UiHandlers::UiExtensionVersion
 
 #include "duckdb/common/string_util.hpp"
@@ -13,13 +13,13 @@ namespace duckdb {
 
 namespace {
 
-// flock version. Compiled in from EXT_VERSION_FLOCK if the build
+// harbor version. Compiled in from EXT_VERSION_HARBOR if the build
 // system provides it (DuckDB's build system auto-defines this from
 // the extension name); otherwise "unknown" so /health is always
 // answerable.
-const char *FlockVersion() {
-#ifdef EXT_VERSION_FLOCK
-	return EXT_VERSION_FLOCK;
+const char *HarborVersion() {
+#ifdef EXT_VERSION_HARBOR
+	return EXT_VERSION_HARBOR;
 #else
 	return "unknown";
 #endif
@@ -65,7 +65,7 @@ string EscapeJsonString(const string &s) {
 
 } // namespace
 
-AdminHandlers::AdminHandlers(FlockHttpServer &server_p) : server(server_p) {
+AdminHandlers::AdminHandlers(HarborHttpServer &server_p) : server(server_p) {
 }
 
 void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
@@ -76,13 +76,13 @@ void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// address, no auth principal — anything else risks information
 	// disclosure on a remote-bound deploy.
 	http.Get("/health", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 
 		auto uptime_s = std::chrono::duration_cast<std::chrono::seconds>(
 		                    std::chrono::steady_clock::now() - self->server.StartedAt())
 		                    .count();
 		auto body = StringUtil::Format("{\"ok\":true,\"version\":\"%s\",\"uptime_s\":%lld}",
-		                               EscapeJsonString(FlockVersion()), static_cast<long long>(uptime_s));
+		                               EscapeJsonString(HarborVersion()), static_cast<long long>(uptime_s));
 		res.set_content(body, "application/json");
 	});
 
@@ -90,13 +90,13 @@ void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// the DuckDB UI can detect the server without running a query.
 	// SPEC §11 lists the headers. PR-3: added X-DuckDB-UI-Extension-Version
 	// so the official UI bundled at ui.duckdb.org sees us as a valid
-	// backend. PR-4: replaced wildcard CORS with flock_cors_origins
+	// backend. PR-4: replaced wildcard CORS with harbor_cors_origins
 	// allow-list lookup (W3C forbids `*` with credentialed requests
 	// and SPEC §7 explicitly forbids it once cookies are involved).
 	// Cross-origin browser callers MUST list their origin in
-	// flock_cors_origins to receive the matching ACAO header.
+	// harbor_cors_origins to receive the matching ACAO header.
 	http.Get("/info", [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 
 		auto request_origin = req.get_header_value("Origin");
 		if (!request_origin.empty()) {
@@ -107,7 +107,7 @@ void AdminHandlers::Register(duckdb_httplib_openssl::Server &http) {
 				res.set_header("Vary", "Origin");
 			}
 		}
-		res.set_header("X-Flock-Version", FlockVersion());
+		res.set_header("X-Harbor-Version", HarborVersion());
 		res.set_header("X-DuckDB-Version", DuckDB::LibraryVersion());
 		res.set_header("X-DuckDB-Platform", DuckDB::Platform());
 		res.set_header("X-Quack-Protocol-Version", kQuackProtocolVersion);

@@ -1,7 +1,7 @@
-#include "flock_lifecycle.hpp"
+#include "harbor_lifecycle.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_http_server.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_http_server.hpp"
 #include "quack_uri.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -14,28 +14,28 @@ namespace duckdb {
 
 namespace {
 
-struct FlockLifecycleBindData : public TableFunctionData {
+struct HarborLifecycleBindData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
 };
 
-struct FlockWaitBindData : public TableFunctionData {
+struct HarborWaitBindData : public TableFunctionData {
 	bool finished = false;
 };
 
 } // namespace
 
-// -- flock_serve ---------------------------------------------------------
+// -- harbor_serve ---------------------------------------------------------
 
 namespace {
 
-unique_ptr<FunctionData> FlockServeBind(ClientContext &context, TableFunctionBindInput &input,
+unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
-	auto bind_data = make_uniq<FlockLifecycleBindData>();
+	auto bind_data = make_uniq<HarborLifecycleBindData>();
 	string listen_uri;
 	if (input.inputs.empty()) {
-		listen_uri = "flock:localhost";
+		listen_uri = "harbor:localhost";
 	} else {
 		auto &uri_value = input.inputs[0];
 		if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
@@ -50,8 +50,8 @@ unique_ptr<FunctionData> FlockServeBind(ClientContext &context, TableFunctionBin
 	bind_data->listen_uri = QuackUri(listen_uri, /* server always listens without SSL */ false);
 	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
 		throw InvalidInputException(
-		    "Only localhost is allowed as a flock RPC hostname by default, set allow_other_hostname=true to override. "
-		    "We strongly recommend reverse-proxying flock when making it publicly available.");
+		    "Only localhost is allowed as a harbor RPC hostname by default, set allow_other_hostname=true to override. "
+		    "We strongly recommend reverse-proxying harbor when making it publicly available.");
 	}
 
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -73,13 +73,13 @@ unique_ptr<FunctionData> FlockServeBind(ClientContext &context, TableFunctionBin
 	return std::move(bind_data);
 }
 
-void FlockServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->CastNoConst<FlockLifecycleBindData>();
+void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<HarborLifecycleBindData>();
 	if (bind_data.finished) {
 		return;
 	}
 
-	FlockServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
+	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
@@ -90,9 +90,9 @@ void FlockServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 
 } // namespace
 
-TableFunctionSet FlockServeFunction::GetFunction() {
-	TableFunctionSet set("flock_serve");
-	auto fun = TableFunction("flock_serve", {LogicalType::VARCHAR}, FlockServe, FlockServeBind);
+TableFunctionSet HarborServeFunction::GetFunction() {
+	TableFunctionSet set("harbor_serve");
+	auto fun = TableFunction("harbor_serve", {LogicalType::VARCHAR}, HarborServe, HarborServeBind);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN; // accepted-but-ignored for upstream parity
 	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
@@ -102,13 +102,13 @@ TableFunctionSet FlockServeFunction::GetFunction() {
 	return set;
 }
 
-// -- flock_stop ----------------------------------------------------------
+// -- harbor_stop ----------------------------------------------------------
 
 namespace {
 
-unique_ptr<FunctionData> FlockStopBind(ClientContext & /* context */, TableFunctionBindInput &input,
+unique_ptr<FunctionData> HarborStopBind(ClientContext & /* context */, TableFunctionBindInput &input,
                                         vector<LogicalType> &return_types, vector<string> &names) {
-	auto bind_data = make_uniq<FlockLifecycleBindData>();
+	auto bind_data = make_uniq<HarborLifecycleBindData>();
 	auto &uri_value = input.inputs[0];
 	if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
 		throw InvalidInputException("Invalid listen string specified");
@@ -122,12 +122,12 @@ unique_ptr<FunctionData> FlockStopBind(ClientContext & /* context */, TableFunct
 	return std::move(bind_data);
 }
 
-void FlockStop(ClientContext & /* context */, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->CastNoConst<FlockLifecycleBindData>();
+void HarborStop(ClientContext & /* context */, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<HarborLifecycleBindData>();
 	if (bind_data.finished) {
 		return;
 	}
-	if (FlockServerState::Global().Stop(bind_data.listen_uri)) {
+	if (HarborServerState::Global().Stop(bind_data.listen_uri)) {
 		output.data[0].SetValue(0, StringUtil::Format("Stopped listening on %s", bind_data.listen_uri.Uri()));
 	} else {
 		output.data[0].SetValue(0, StringUtil::Format("No server found listening on %s", bind_data.listen_uri.Uri()));
@@ -138,30 +138,30 @@ void FlockStop(ClientContext & /* context */, TableFunctionInput &data_p, DataCh
 
 } // namespace
 
-TableFunction FlockStopFunction::GetFunction() {
-	return TableFunction("flock_stop", {LogicalType::VARCHAR}, FlockStop, FlockStopBind);
+TableFunction HarborStopFunction::GetFunction() {
+	return TableFunction("harbor_stop", {LogicalType::VARCHAR}, HarborStop, HarborStopBind);
 }
 
-// -- flock_wait ----------------------------------------------------------
+// -- harbor_wait ----------------------------------------------------------
 
 namespace {
 
-unique_ptr<FunctionData> FlockWaitBind(ClientContext & /* context */, TableFunctionBindInput & /* input */,
+unique_ptr<FunctionData> HarborWaitBind(ClientContext & /* context */, TableFunctionBindInput & /* input */,
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("ok");
-	return make_uniq<FlockWaitBindData>();
+	return make_uniq<HarborWaitBindData>();
 }
 
-void FlockWait(ClientContext & /* context */, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->CastNoConst<FlockWaitBindData>();
+void HarborWait(ClientContext & /* context */, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->CastNoConst<HarborWaitBindData>();
 	if (bind_data.finished) {
 		return;
 	}
-	// Blocks until FlockServerState::Stop() (called from flock_stop /
+	// Blocks until HarborServerState::Stop() (called from harbor_stop /
 	// quack_stop on another session) or process signal (SIGTERM/SIGINT).
 	// Throws InvalidInputException if no server is currently running.
-	auto ok = FlockServerState::Global().Wait();
+	auto ok = HarborServerState::Global().Wait();
 	output.SetValue(0, 0, Value::BOOLEAN(ok));
 	output.SetCardinality(1);
 	bind_data.finished = true;
@@ -169,8 +169,8 @@ void FlockWait(ClientContext & /* context */, TableFunctionInput &data_p, DataCh
 
 } // namespace
 
-TableFunction FlockWaitFunction::GetFunction() {
-	return TableFunction("flock_wait", {}, FlockWait, FlockWaitBind);
+TableFunction HarborWaitFunction::GetFunction() {
+	return TableFunction("harbor_wait", {}, HarborWait, HarborWaitBind);
 }
 
 } // namespace duckdb

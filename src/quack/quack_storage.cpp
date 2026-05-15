@@ -1,7 +1,7 @@
 // PR-2 refactor of upstream duckdb-quack's quack_storage.cpp.
 //
 // All server-management code (CreateServer / StopServer / ListServers
-// + the multi-server map) is gone — that's FlockServerState::Global()
+// + the multi-server map) is gone — that's HarborServerState::Global()
 // now (single-server-per-process per SPEC §2). What's left here is
 // the ATTACH 'quack:host' codepath, which is unchanged semantically.
 
@@ -19,8 +19,13 @@ namespace {
 unique_ptr<Catalog> QuackAttach(optional_ptr<StorageExtensionInfo> /* storage_info */, ClientContext &context,
                                 AttachedDatabase &db, const string &name, AttachInfo &info,
                                 AttachOptions &attach_options) {
-	// info.path may or may not already carry the "quack:" prefix.
-	auto uri = StringUtil::StartsWith(info.path, "quack:") ? info.path : "quack:" + info.path;
+	// info.path may or may not already carry the "quack:" or "harbor:" prefix.
+	// Keep quack: for stock-client compatibility, and accept harbor: for
+	// Harbor-aware clients using TYPE harbor. If no scheme is present,
+	// preserve upstream behavior and assume quack:.
+	auto uri = (StringUtil::StartsWith(info.path, "quack:") || StringUtil::StartsWith(info.path, "harbor:"))
+	               ? info.path
+	               : "quack:" + info.path;
 	auto initial_uri = QuackUri(uri);
 
 	// no ssl on local by default

@@ -4,7 +4,7 @@
 // state) and HttpQuackServer derived class (httplib::Server ownership
 // + listener thread) are gone. QuackHandlers is what's left: a
 // stateless-w.r.t.-transport route registrar that borrows references
-// to SessionManager + AuthManager + FlockHttpServer.
+// to SessionManager + AuthManager + HarborHttpServer.
 //
 // What stays from upstream:
 //   - Wire-format dispatch logic (HandleMessage / HandleMessageInternal)
@@ -15,12 +15,12 @@
 //     DisconnectMessage, etc.
 //
 // What changes:
-//   - QuackConnection → FlockSession (same fields; rename for SPEC §6 vocab)
+//   - QuackConnection → HarborSession (same fields; rename for SPEC §6 vocab)
 //   - GenerateSessionId() → sessions.GenerateSessionId()
 //   - GetConnection / CreateNewConnection / DisconnectConnection → sessions.*
 //   - EvaluateAuthQuery + GetSettingString lookup → auth.RunAuthentication / RunAuthorization
 //   - Token() → auth.ServerToken()
-//   - HandleMessageInternal session arg: optional_ptr<QuackConnection> → shared_ptr<FlockSession>
+//   - HandleMessageInternal session arg: optional_ptr<QuackConnection> → shared_ptr<HarborSession>
 //
 // The wire format on /quack is byte-identical to upstream Quack —
 // PR-1.5's roundtrip test verifies this.
@@ -36,9 +36,9 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/storage/temporary_file_manager.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_http_server.hpp"
-#include "flock_session.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_http_server.hpp"
+#include "harbor_session.hpp"
 
 #include "quack_log.hpp"
 #include "quack_message.hpp"
@@ -46,7 +46,7 @@
 
 namespace duckdb {
 
-QuackHandlers::QuackHandlers(FlockHttpServer &server_p, SessionManager &sessions_p, AuthManager &auth_p,
+QuackHandlers::QuackHandlers(HarborHttpServer &server_p, SessionManager &sessions_p, AuthManager &auth_p,
                              weak_ptr<DatabaseInstance> db_p)
     : server(server_p), sessions(sessions_p), auth(auth_p), db(std::move(db_p)) {
 }
@@ -133,7 +133,7 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessage(MemoryStream &read_stream)
 	// remainder of the request — keeps the session alive even if a
 	// concurrent DISCONNECT erases the map mid-request (per GPT-5.5
 	// round 5 catch #2).
-	shared_ptr<FlockSession> session;
+	shared_ptr<HarborSession> session;
 	if (MessageRequiresConnection(header.type)) {
 		session = sessions.GetConnection(header.connection_id);
 		if (!session) {
@@ -162,7 +162,7 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessage(MemoryStream &read_stream)
 }
 
 unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &db_inst, QuackMessage &received_message,
-                                                               shared_ptr<FlockSession> session) {
+                                                               shared_ptr<HarborSession> session) {
 	switch (received_message.Type()) {
 	case MessageType::CONNECTION_REQUEST: {
 		auto &connection_request_message = received_message.Cast<ConnectionRequestMessage>();
@@ -297,17 +297,17 @@ void QuackHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	auto *self = this;
 
 	// PR-4: OPTIONS /quack is owned by AuthHandlers, which uses the
-	// flock_cors_origins allow-list (W3C forbids wildcard origin with
+	// harbor_cors_origins allow-list (W3C forbids wildcard origin with
 	// credentialed requests; SPEC §7). Don't register a wildcard
 	// handler here — it would shadow the allow-list-aware one.
 
 	// The protocol. Each request increments the active-request counter
-	// via the ActiveRequestGuard so FlockHttpServer::Close() can drain.
+	// via the ActiveRequestGuard so HarborHttpServer::Close() can drain.
 	http.Post("/quack", [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
 	                           const duckdb_httplib_openssl::ContentReader &content_reader) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		// PR-4: replace wildcard CORS with allow-list lookup. If the
-		// request Origin is in flock_cors_origins, echo the exact
+		// request Origin is in harbor_cors_origins, echo the exact
 		// match (never the verbatim header). If not, omit the header
 		// entirely — the browser will block the cross-origin response.
 		// Non-browser clients (the common case for /quack) don't send

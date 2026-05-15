@@ -1,6 +1,6 @@
 #pragma once
 
-// SessionManager and FlockSession — the per-process DB session pool.
+// SessionManager and HarborSession — the per-process DB session pool.
 //
 // Lifted from upstream QuackServer's connection-pool members
 // (active_connections + session_id_rng) so that PR-3+ handler subsystems
@@ -8,7 +8,7 @@
 //
 // PR-2 keeps the existing semantics (no idle TTL, no per-principal
 // scoping) — those land in PR-3/PR-4 with the auth-cookie/principal
-// model. The struct shape of FlockSession is identical to upstream
+// model. The struct shape of HarborSession is identical to upstream
 // QuackConnection; only the name changes to align with SPEC §6
 // vocabulary.
 
@@ -35,10 +35,10 @@ class EncryptionState;
 // for the duration of a request to keep the session alive even if a
 // concurrent disconnect erases the map entry mid-request (a real race
 // the previous optional_ptr design would have hit).
-struct FlockSession {
-	explicit FlockSession(string session_id_p);
-	FlockSession(string session_id_p, string owner_principal_id_p);
-	~FlockSession();
+struct HarborSession {
+	explicit HarborSession(string session_id_p);
+	HarborSession(string session_id_p, string owner_principal_id_p);
+	~HarborSession();
 
 	mutex lock;
 	unique_ptr<Connection> duckdb_connection;
@@ -86,7 +86,7 @@ public:
 	// NO ownership check. /sql callers should use LookupOwnedSession()
 	// instead, which conflates "not found" and "wrong owner" into a
 	// single nullptr return per SPEC §6 line 637-643 (anti-enumeration).
-	shared_ptr<FlockSession> GetConnection(const string &session_id);
+	shared_ptr<HarborSession> GetConnection(const string &session_id);
 
 	// Destroy a session by id. Returns false if the id was not registered.
 	// Idempotent for the "not-found" case. NO ownership check; used by
@@ -102,7 +102,7 @@ public:
 	// derive principal from successful auth).
 	//
 	// Throws SESSION_LIMIT-mapped InvalidInputException if the active
-	// session count would exceed `flock_max_sessions` (default 1024).
+	// session count would exceed `harbor_max_sessions` (default 1024).
 	// Note: the limit applies to the GLOBAL active count, not per-principal,
 	// matching SPEC §6 "limits" table.
 	string CreateOwnedSession(const string &session_id, const string &owner_principal_id);
@@ -113,7 +113,7 @@ public:
 	// indistinguishable to the caller, by design (SPEC §6 line 637-643).
 	// `principal_id` empty matches sessions with empty owner (legacy
 	// path); a non-empty principal_id requires exact match.
-	shared_ptr<FlockSession> LookupOwnedSession(const string &session_id, const string &principal_id);
+	shared_ptr<HarborSession> LookupOwnedSession(const string &session_id, const string &principal_id);
 
 	// Destroy a session by id, gated on ownership. Returns false if EITHER
 	// not-found OR wrong-owner. Idempotent for the not-found case.
@@ -133,7 +133,7 @@ public:
 	// force_mbedtls_unsafe='true', or outright failure in read-only mode). So
 	// this is practically OpenSSL's RAND_bytes via httpfs, even though we
 	// don't link OpenSSL for this particular call. See the parallel comment
-	// on AuthManager::GenerateRandomToken in src/include/flock_auth.hpp.
+	// on AuthManager::GenerateRandomToken in src/include/harbor_auth.hpp.
 	// Thread-safe; the rng_mutex guards lazy-init only — actual byte
 	// generation is single-call into DuckDB's encryption util.
 	string GenerateSessionId();
@@ -146,7 +146,7 @@ private:
 	weak_ptr<DatabaseInstance> db;
 
 	std::mutex active_mutex;
-	unordered_map<string, shared_ptr<FlockSession>> active;
+	unordered_map<string, shared_ptr<HarborSession>> active;
 
 	std::mutex rng_mutex;
 	shared_ptr<EncryptionState> rng;
