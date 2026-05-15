@@ -1,14 +1,19 @@
 add_subdirectory(quack)
 
 # flock-original sources. PR-2 added the FlockHttpServer / SessionManager /
-# AuthManager / AdminHandlers / lifecycle plumbing.
+# AuthManager / AdminHandlers / lifecycle plumbing. PR-4 added flock_crypto
+# (libcrypto wrapper for SHA-256, HMAC-SHA256, RAND_bytes, base64url) and
+# AuthHandlers (POST /auth/login, POST /auth/logout, OPTIONS /auth/*,
+# OPTIONS /quack).
 add_library(
   flock_library OBJECT
   flock_extension.cpp
   flock_http_server.cpp
   flock_session.cpp
   flock_auth.cpp
+  flock_crypto.cpp
   admin_handlers.cpp
+  auth_handlers.cpp
   flock_lifecycle.cpp)
 
 # PR-3: vendored duckdb-ui sources, refactored into UiHandlers.

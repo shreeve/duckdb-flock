@@ -1,15 +1,37 @@
 #pragma once
 
-// AuthManager — server-token + auth/authz callback resolution.
+// AuthManager — server-token + auth/authz callback resolution +
+// (PR-4) cookie issuance/verification and CORS allow-list resolution.
 //
-// Lifted from upstream QuackServer's auth-related members and the
-// static EvaluateAuthQuery free function. PR-2 keeps the existing
-// semantics (BOOLEAN-returning auth callback per CONNECTION_REQUEST,
-// BOOLEAN-returning authz callback per PREPARE/APPEND) — the SPEC §7
-// principal-id / cookie / admin-authz model lands in PR-3 once the
-// auth-cookie flow is in place. The cryptographic primitives that PR-3
-// needs (SHA-256 / HMAC-SHA256 / CSPRNG) come from OpenSSL libcrypto
-// via src/flock_crypto.{cpp,hpp} (introduced in PR-3, not here).
+// PR-2 lifted the auth-related members and EvaluateAuthQuery free
+// function from upstream QuackServer.
+//
+// PR-4 layered on:
+//   - HMAC-signed flock_session cookie: IssueCookie + VerifyCookie.
+//     Signing key is process-static, ephemeral random (32 bytes from
+//     RAND_bytes), lazy-initialized on first use under a mutex. There
+//     is deliberately NO SQL setting for the signing key — exposing
+//     the HMAC secret to authorized SQL would let any SQL caller mint
+//     cookies. v0.2 will reintroduce operator control via the
+//     FLOCK_COOKIE_SIGNING_KEY environment variable. See SPEC §7 +
+//     §15 question 2.
+//   - AuthenticateRequest: unified entry point for cookie/bearer/
+//     X-Flock-Token detection with explicit precedence (Bearer >
+//     X-Flock-Token > Cookie). Bad bearer NEVER falls back to cookie
+//     (prevents ambient browser state from masking explicit-credential
+//     failures).
+//   - CORS allow-list (flock_cors_origins setting): InitCorsConfig
+//     reads the setting at flock_serve time and refuses to start if
+//     it's '*'. ResolveCorsOrigin returns the matching origin (or
+//     empty) for a given request Origin header.
+//
+// Cryptographic primitives (SHA-256, HMAC-SHA256, RAND_bytes,
+// base64url, constant-time compare) live in src/flock_crypto.{cpp,hpp}.
+// AuthManager calls them; it doesn't reimplement them.
+
+#include <cstdint>
+#include <mutex>
+#include <vector>
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/shared_ptr.hpp"
@@ -17,9 +39,45 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector.hpp"
 
+// Forward-declare instead of including httplib.hpp here — the
+// AuthenticateRequest signature uses `const httplib::Request &`, but
+// pulling httplib into every translation unit that includes
+// flock_auth.hpp would be a heavy dependency. The .cpp does the include.
+namespace duckdb_httplib_openssl {
+struct Request;
+}
+
 namespace duckdb {
 
 class DatabaseInstance;
+
+// Where the credential came from on a given request. Used by handlers
+// for log-line attribution and (future) per-source policy choices.
+enum class AuthSource : uint8_t {
+	kNone = 0,
+	kBearer,        // Authorization: Bearer <token>
+	kXFlockToken,   // X-Flock-Token: <token>
+	kCookie,        // Cookie: flock_session=<signed>
+	kLocalDev       // flock_local_dev_mode bypass; principal is "__local_dev__"
+};
+
+struct AuthResult {
+	bool ok = false;
+	string principal_id;          // hex(sha256(token)); empty when ok=false
+	AuthSource source = AuthSource::kNone;
+	// Stable error code suitable for HTTP body: "MISSING_CREDENTIAL",
+	// "INVALID_TOKEN", "BAD_COOKIE_FORMAT", "BAD_COOKIE_SIG",
+	// "COOKIE_EXPIRED". Empty on ok.
+	string error_code;
+};
+
+// Result of CORS allow-list resolution. `origin` is the exact value
+// to echo back in Access-Control-Allow-Origin (never '*'). `allowed`
+// is true iff the request origin matched.
+struct CorsDecision {
+	bool allowed = false;
+	string origin;
+};
 
 class AuthManager {
 public:
@@ -39,31 +97,106 @@ public:
 
 	// CSPRNG-backed 16-byte (128-bit) token, hex-encoded (32 chars).
 	// Uses db.GetEncryptionUtil() — not OpenSSL — because that's what
-	// upstream uses and it's already wired up. PR-3's flock_crypto.cpp
-	// will likely route this through OpenSSL's RAND_bytes for unification.
+	// upstream uses and it's already wired up. PR-4's flock_crypto.cpp
+	// would let us route this through OpenSSL's RAND_bytes, but for
+	// now we leave it unchanged to keep the diff small; both are
+	// CSPRNG-grade.
 	static string GenerateRandomToken(DatabaseInstance &db);
 
 	// Run the authentication callback against a transient Connection.
 	// Reads the function name from the `quack_authentication_function`
-	// setting (PR-3 will add `flock_authentication_function` as an
-	// alias setting pointing at the same default) and invokes it as
-	// `SELECT <fn_name>(?, ?, ?)` with `(session_id, client_token,
-	// server_token)` bound as prepared parameters — never string-formatted.
-	// Returns false on any failure path (NULL, non-bool, exception, false).
+	// setting and invokes it as `SELECT <fn_name>(?, ?, ?)` with
+	// `(session_id, client_token, server_token)` bound as prepared
+	// parameters — never string-formatted. Returns false on any
+	// failure path (NULL, non-bool, exception, false).
 	bool RunAuthentication(const string &session_id, const string &client_token);
 
 	// Run the authorization callback against a transient Connection.
-	// Reads the function name from `quack_authorization_function` and
-	// invokes it as `SELECT <fn_name>(?, ?)` with `(session_id, query)`
-	// bound as prepared parameters. `query` is the user's SQL for
-	// /quack PREPARE, the synthetic INSERT for APPEND, or in PR-3+ the
-	// synthetic `__FLOCK_ADMIN__:resource:action` strings for admin
-	// endpoints. Returns false on any failure path.
+	// See header comment in flock_auth.cpp for the SQL shape and
+	// failure-path contract.
 	bool RunAuthorization(const string &session_id, const string &query);
 
+	// ---- PR-4: cookie issuance + verification ----
+
+	// Issue a signed flock_session cookie value for `principal_hex`
+	// expiring `ttl_s` seconds from now. Format (per SPEC §7):
+	//
+	//   v1 . b64url(principal_hex)
+	//      . b64url(expires_unix_ascii)
+	//      . b64url(nonce16)
+	//      . b64url(hmac32)
+	//
+	// HMAC is over the exact ASCII bytes "v1.<seg1>.<seg2>.<seg3>"
+	// using the process-static signing key (lazy-initialized on first
+	// call). Returns the cookie value (NOT including the
+	// "flock_session=" name or attributes — that's the handler's job).
+	string IssueCookie(const string &principal_hex, uint64_t ttl_s);
+
+	// Verify a flock_session cookie value. Returns ok=true iff:
+	//   - the value parses as v1.<seg1>.<seg2>.<seg3>.<seg4>
+	//   - HMAC over "v1.<seg1>.<seg2>.<seg3>" matches seg4 (constant-time)
+	//   - principal_hex (decoded seg1) is 64 lowercase hex chars
+	//   - expires_unix (decoded seg2) is in the future relative to now
+	// On failure, error_code is set; principal_id stays empty.
+	AuthResult VerifyCookie(const string &cookie_value);
+
+	// Unified per-request authentication. Parses Authorization,
+	// X-Flock-Token, and Cookie headers per precedence:
+	//
+	//   1. Authorization: Bearer <token>     — runs RunAuthentication;
+	//                                           on FAIL returns 401
+	//                                           (no fallback to cookie)
+	//   2. X-Flock-Token: <token>            — same as bearer
+	//   3. Cookie: flock_session=<value>     — VerifyCookie (HMAC only)
+	//
+	// `synthetic_session_id` is passed to RunAuthentication when
+	// either of the explicit headers is present; common values are
+	// "__FLOCK_AUTH__:login" (for /auth/login) or the per-route sid
+	// chosen by the calling handler.
+	AuthResult AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
+	                               const string &synthetic_session_id);
+
+	// ---- PR-4: CORS allow-list ----
+
+	// Parse `flock_cors_origins` setting at flock_serve time. Throws
+	// InvalidInputException if the setting is "*" (wildcard +
+	// credentials is forbidden by spec and by us — see SPEC §7).
+	// Tolerates empty / whitespace-only entries (skipped). Each entry
+	// must be a well-formed origin: scheme://host[:port], no path,
+	// no query, no fragment, no trailing slash.
+	void InitCorsConfig(const string &cors_origins_setting);
+
+	// Resolve an incoming Origin header against the configured
+	// allow-list. Returns CorsDecision{allowed=true, origin=<exact
+	// match>} or CorsDecision{allowed=false}. The `origin` field is
+	// always the exact value to echo back (never '*').
+	CorsDecision ResolveCorsOrigin(const string &request_origin) const;
+
+	// True iff any CORS origins are configured. Handlers can short-
+	// circuit OPTIONS preflight setup when no allow-list exists.
+	bool CorsConfigured() const {
+		return !cors_allowed_origins.empty();
+	}
+
 private:
+	// Lazy-initialize the cookie signing key under mutex. Returns a
+	// const reference into the member vector; the vector is never
+	// resized after init, so the reference is stable.
+	const std::vector<uint8_t> &CookieSigningKey();
+
+	// Validate a single CORS origin string. Throws on malformed input.
+	static void ValidateCorsOrigin(const string &origin);
+
 	weak_ptr<DatabaseInstance> db;
 	string server_token;
+
+	std::mutex signing_key_mutex;
+	std::vector<uint8_t> signing_key; // 32 random bytes; init on first IssueCookie/VerifyCookie call
+
+	// Parsed flock_cors_origins. Each entry is an exact Origin header
+	// value to match against (e.g. "https://app.example.com",
+	// "http://localhost:3000"). Comparison is byte-equal.
+	std::vector<string> cors_allowed_origins;
 };
 
 } // namespace duckdb

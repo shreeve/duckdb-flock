@@ -34,7 +34,7 @@ incrementally.
 | **PR-1.5** | Enable `LOAD_TESTS` so `test/sql/flock.test` actually runs in CI. Extend the smoke test with a `/quack` runtime roundtrip block (con1 hosts via `quack_serve`, con2 attaches via `quack_query`, transactions/secrets/auth-failure all exercised, clean `quack_stop`). Document the five surgical edits to vendored `quack_extension.cpp` in [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md). Add the roundtrip-passes-after-refactor item to the PR-2 acceptance checklist below. | Anything that changes wire format or production behavior. PR-1.5 is purely test/doc infrastructure that PR-2's refactor can be measured against. |
 | **PR-2** | Architectural refactor: extract `httplib::Server` from `QuackServer` into a new `FlockHttpServer`; rename `QuackServer` → `QuackHandlers`; extract `SessionManager` + `AuthManager` as standalone subsystems. Add `/health` and `/info` routes registered against the shared server. Introduce `flock_serve` / `flock_stop` / `flock_wait` with SPEC §9 semantics; keep `quack_*` as functional aliases. Quack roundtrip test passes throughout. CI grep guard active. | UI, `/sql`, admin handlers. |
 | **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. Migrated `FlockHttpServer` from `duckdb_httplib::Server` (plain) to `duckdb_httplib_openssl::Server` (one namespace throughout — UI handlers can register on the shared server cleanly). UI assets via `proxy` mode (forward `GET /.*` to `ui.duckdb.org` over OpenSSL-backed cpp-httplib HTTPS client — `bundled` mode is post-v0.1, see SPEC §14). Auth: upstream UI's same-Origin check (allowed Origins = loopback variants + bind host) — flock cookie auth deferred to PR-4. AdminHandlers `/info` extended with `X-DuckDB-UI-Extension-Version`. `FlockHttpServer::ShutdownHandlers()` added so long-running threads (UiHandlers' Watcher, EventDispatcher's SSE consumers) get released BEFORE the active-request drain. SSE handler captures `shared_ptr<ActiveRequestGuard>` in the chunked content provider closure. CI grep guard updated to match both namespaces. | `/sql`, admin. `bundled` UI assets mode. Cookie auth + flock_crypto + login wrapper (PR-4). |
-| **PR-4** (current) | `src/flock_crypto.{cpp,hpp}` wraps OpenSSL `libcrypto` for SHA-256 (`principal_id` derivation per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), and CSPRNG (`RAND_bytes` for cookie keys + session IDs). HMAC-signed cookie issuance via `POST /auth/login`; `POST /auth/logout` clears it. UiHandlers' Origin-set check supplemented with cookie-aware auth on `/ddb/*`. flock-specific login wrapper at `GET /` (registered before UiHandlers' GET /.* catch-all). `flock_cors_origins` allow-list replaces the wildcard `Access-Control-Allow-Origin: *` on `/quack` and `/info`. | `/sql` (PR-5). Admin handlers (PR-6). `bundled` UI assets mode. |
+| **PR-4** (current) | `src/flock_crypto.{cpp,hpp}` wraps OpenSSL `libcrypto` for SHA-256 (`principal_id = hex(sha256(token))` per SPEC §6), HMAC-SHA256 (`flock_session` cookie signing per SPEC §7), CSPRNG (`RAND_bytes` for ephemeral signing key + 16-byte cookie nonce), and base64url. New `AuthHandlers` registers `POST /auth/login` (synthetic sid `__FLOCK_AUTH__:login`), `POST /auth/logout`, `OPTIONS /auth/*`, `OPTIONS /quack`. AuthManager extended with `AuthenticateRequest()` returning `{ok, principal_id, source, error_code}` (precedence: `Authorization: Bearer` → `X-Flock-Token` → `Cookie` — explicit-bad bearer never falls back to cookie). UiHandlers' Origin-set check supplemented with cookie-aware auth on `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`, AND `/localEvents`. The UI catch-all (`GET /.*`) is now cookie-gated: no valid cookie → minimal HTML login page; valid cookie → proxy through to `ui.duckdb.org` (Option B per round-11 review — single code path owns "serve UI asset"). UI connection pool keyed on `(principal_id, X-DuckDB-UI-Connection-Name)` so user-controlled connection names cannot collide across principals (round-11 blocker fix). Local-dev bypass uses fixed principal `__local_dev__` so the principal-scoped invariant holds even with `flock_local_dev_mode=true`. `flock_cors_origins` allow-list replaces the wildcard `Access-Control-Allow-Origin: *` on `/info`; `OPTIONS` preflight wired for `/quack` and `/auth/*`; `flock_serve` refuses to start if `flock_cors_origins='*'`. **Cookie signing key is ephemeral random per process** (NOT a SQL setting — closes the SQL-readable-secret leak; see SPEC §7 + §15 question 2). Settings registered: `flock_auth_cookie_ttl_s`, `flock_cors_origins`, `flock_local_dev_mode`. | `/sql` (PR-5). Admin handlers (PR-6). `bundled` UI assets mode. `(principal, ui_connection_name) → db_session_id` map in SessionManager (PR-5 once /sql lands and SessionManager genuinely needs principal scope; PR-4 only scopes UiHandlers' connection-name pool). `?destroy_sessions=true` on `/auth/logout` (logged-but-ignored in PR-4). `flock_cookie_signing_key` SQL setting (deferred to v0.2 as `FLOCK_COOKIE_SIGNING_KEY` env var). |
 | **PR-5** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
 | **PR-6** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
 | **PR-7+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
@@ -122,6 +122,107 @@ Two follow-up TODOs were captured in code as comments at PR-2 merge:
    — `Access-Control-Allow-Origin: *` is fine for `/quack`-only today
    (no cookies flow through `/quack`); PR-3 must replace with the
    configured `flock_cors_origins` allow-list when cookie auth arrives.
+   **Resolved in PR-4** — `OPTIONS /quack` is owned by `AuthHandlers`
+   with the allow-list, and `POST /quack` echoes the matching origin
+   only when the request `Origin` is in `flock_cors_origins`.
+
+### PR-4 acceptance closure (closed)
+
+PR-4 added cookie auth to the UI surface, the `flock_crypto` libcrypto
+wrapper, and the `flock_cors_origins` allow-list. Round-11 GPT-5.5
+review surfaced two security improvements over the SPEC's earlier
+draft, both of which were folded in before code landed (see SPEC §7
++ §15 question 2 for the rationale). All acceptance criteria green at
+merge:
+
+- [x] `src/flock_crypto.{cpp,hpp}` implements SHA-256, HMAC-SHA256,
+      RAND_bytes, base64url, and constant-time-equal as a thin layer
+      over OpenSSL `libcrypto` (already linked via PR-3).
+- [x] `flock_session` cookie format is
+      `v1.<b64url(principal)>.<b64url(expires_unix)>.<b64url(nonce16)>.<b64url(hmac32)>`.
+      HMAC is over the exact ASCII bytes of `v1.<seg1>.<seg2>.<seg3>`
+      so verification recomputes over the on-the-wire prefix. Constant-
+      time MAC compare via `CRYPTO_memcmp`.
+- [x] Cookie signing key is **ephemeral random per process** (32 bytes
+      from `RAND_bytes`, lazy-init under mutex on first use). NO
+      `flock_cookie_signing_key` SQL setting in v0.1 (security review:
+      exposing the HMAC secret to authorized SQL would let any SQL
+      caller mint cookies). v0.2 reintroduces operator control via
+      the `FLOCK_COOKIE_SIGNING_KEY` environment variable.
+- [x] `AuthManager::AuthenticateRequest` parses request credentials in
+      precedence order Bearer → X-Flock-Token → Cookie. Bad bearer
+      NEVER falls back to cookie (round-11 review: explicit creds
+      should not be masked by ambient browser state).
+- [x] `AuthHandlers` owns `POST /auth/login` (synthetic sid
+      `__FLOCK_AUTH__:login`), `POST /auth/logout`, `OPTIONS /auth/*`,
+      and `OPTIONS /quack`. Login accepts JSON body, Bearer header,
+      or X-Flock-Token. Sets `Set-Cookie flock_session=v1...; HttpOnly;
+      SameSite=Strict; Path=/; Max-Age=<ttl>` plus `Secure` when
+      `X-Forwarded-Proto: https`. Logout always returns 200 (never
+      reveals whether the caller had a valid cookie).
+- [x] UI catch-all `GET /.*` is cookie-gated (Option B per round-11
+      review — single code path owns "serve UI asset", with cookie
+      check inline). No cookie + `GET /` → minimal flock login page
+      (~70 lines inline HTML/CSS/JS, no external deps). No cookie +
+      any other `GET` → 401. Valid cookie or `flock_local_dev_mode` →
+      proxy through to `ui.duckdb.org`.
+- [x] `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`, **and**
+      `/localEvents` (round-11 catch — closes the unauthenticated SSE
+      catalog-change observation channel) gated on Origin (CSRF) AND
+      auth (cookie/bearer/local-dev). SPEC §7 line 861 invariant
+      "Browser-origin requests do NOT bypass auth" enforced.
+- [x] **UI connection pool keyed on `principal_id || \\0 || X-DuckDB-UI-Connection-Name`**
+      (round-11 blocker fix). `X-DuckDB-UI-Connection-Name` is
+      user-controlled; raw keying would let principal A guess/share
+      principal B's connection. Composite keying isolates per-principal
+      pools without changing `UIStorageExtensionInfo`'s API.
+- [x] Local-dev bypass uses fixed principal
+      `sha256("__FLOCK_LOCAL_DEV__")` so the principal-scoped invariant
+      holds even with `flock_local_dev_mode=true`.
+- [x] `flock_cors_origins` allow-list replaces wildcard CORS on `/info`
+      and `/quack`. Each entry must be a well-formed
+      `scheme://host[:port]` (no path/query/fragment/trailing slash).
+      `flock_serve` **refuses to start** if the setting is `'*'` or
+      contains a malformed entry — the SQL `CALL flock_serve(...)`
+      throws and the server never binds.
+- [x] OPTIONS preflight on `/quack`, `/auth/login`, `/auth/logout`
+      emits `Access-Control-Allow-Origin: <exact-match>` only when
+      the request Origin is in the allow-list. Bare 204 with no CORS
+      headers when not (browser blocks). Allowed headers per SPEC §7.
+- [x] Three new settings registered in `quack_extension.cpp::LoadInternal`:
+      `flock_auth_cookie_ttl_s` UBIGINT default 43200,
+      `flock_cors_origins` VARCHAR default `''`,
+      `flock_local_dev_mode` BOOLEAN default `false`.
+- [x] `test/sql/flock.test` extended (22 → 40 assertions) with
+      PR-4-specific coverage: setting registration, defaults, refuse-
+      to-start scenarios for `flock_cors_origins='*'`, malformed
+      origin (path), missing scheme, and non-http(s) scheme.
+- [x] HTTP-level cookie roundtrip tested by
+      `scripts/golden-cookie-auth.sh` (10 assertions covering /info
+      no-Origin / allowed-Origin / disallowed-Origin, /auth/login
+      valid/invalid/Bearer, /auth/logout cookie-clear, GET / login
+      page, GET /random 401, /quack still served).
+- [x] PR-1.5 `/quack` runtime roundtrip in `test/sql/flock.test`
+      passes byte-for-byte after the AuthHandlers wrapping (40
+      assertions total, all green; quack wire compat preserved).
+- [x] All 7 CI checks green.
+
+Two follow-up TODOs captured in code at PR-4 merge:
+
+1. **Default-deny for unknown Authentication scheme.** AuthManager's
+   try_explicit_token requires `Authorization: Bearer ` prefix; an
+   `Authorization: Basic ...` header is treated as missing-credential
+   and falls through to cookie/X-Flock-Token. Acceptable for v0.1 (we
+   only document Bearer) but should explicitly reject other schemes
+   in PR-5+ to avoid accidental "Basic" passthrough on misconfigured
+   reverse proxies.
+2. **Login page CSP + nonce.** The inline `<script>` runs without a
+   `Content-Security-Policy` header, which means a future XSS in any
+   future flock-served page could inject script. The login page itself
+   has no XSS surface (no untrusted strings interpolated), but PR-5+
+   should add CSP `default-src 'self'; script-src 'nonce-<random>';`
+   when the SQL endpoint adds error pages with potentially-tainted
+   strings.
 
 ## Critical rules — read first
 
@@ -183,7 +284,9 @@ DuckDB's community extension repo (planned) and GitHub Releases (today).
 | `src/flock_extension.cpp` | Entry point: registers settings, scalar functions, `flock_serve`/`flock_stop`/`flock_wait` table macros | Yes |
 | `src/flock_http_server.{cpp,hpp}` | `FlockHttpServer` — owns the cpp-httplib `Server`, holds shared state | Yes |
 | `src/flock_session.{cpp,hpp}` | `SessionManager` — per-session DuckDB `Connection` pool with mutex | Yes |
-| `src/flock_auth.{cpp,hpp}` | `AuthManager` — token + hook resolution, HMAC cookie sign/verify, `/auth/login` and `/auth/logout` handlers | Yes |
+| `src/flock_auth.{cpp,hpp}` | `AuthManager` — token + hook resolution, HMAC cookie sign/verify (PR-4), CORS allow-list parsing (PR-4) | Yes |
+| `src/flock_crypto.{cpp,hpp}` | OpenSSL libcrypto wrapper: SHA-256, HMAC-SHA256, RAND_bytes, base64url, constant-time-equal (PR-4) | Yes |
+| `src/auth_handlers.{cpp,hpp}` | `AuthHandlers` — `POST /auth/login`, `POST /auth/logout`, `OPTIONS /auth/*`, `OPTIONS /quack` (PR-4) | Yes |
 | `src/flock_log.{cpp,hpp}` | `'Flock'` and `'HTTP'` log type registration | Yes |
 | `src/flock_wait.{cpp,hpp}` | Blocking `flock_wait()` table function — keeps the DuckDB process alive in container/daemon mode | Yes |
 | `src/quack/quack_handlers.{cpp,hpp}` | `/quack` route registration + dispatch | Yes (was `QuackServer` upstream) |
@@ -198,6 +301,7 @@ DuckDB's community extension repo (planned) and GitHub Releases (today).
 | `scripts/fetch-ui-assets.sh` | Mirror `ui.duckdb.org` → `ui_assets_data.cpp` + `UI_ASSETS_VERSION.txt` | Yes |
 | `scripts/golden-quack-roundtrip.sh` | Regression: stock Quack client ↔ flock | Yes |
 | `scripts/golden-ui-roundtrip.sh` | Regression: official UI ↔ flock | Yes |
+| `scripts/golden-cookie-auth.sh` | Regression (PR-4): HTTP cookie + CORS roundtrip — `/auth/login`, `/auth/logout`, login page, `/info` allow-list | Yes |
 | `test/unit/` | C++ unit tests for encoders, session manager, auth resolution | Yes |
 | `test/integration/` | End-to-end: spin a flock, hit it, assert | Yes |
 | `test/golden/quack/`, `test/golden/ui/` | Captured wire-format fixtures | Carefully — regenerate from real clients |

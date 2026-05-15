@@ -239,6 +239,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
 
+	// PR-4: cookie auth + CORS allow-list settings (per SPEC §9). The
+	// cookie SIGNING KEY is deliberately NOT a SQL-readable setting in
+	// v0.1 — exposing the HMAC secret to authorized SQL would let any
+	// SQL caller mint cookies. AuthManager generates 32 random bytes
+	// per process at first use; v0.2 reintroduces operator control
+	// via the FLOCK_COOKIE_SIGNING_KEY environment variable.
+	config.AddExtensionOption("flock_auth_cookie_ttl_s",
+	                          "TTL in seconds for HMAC-signed flock_session cookies issued by /auth/login (default 12h)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(43200), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("flock_cors_origins",
+	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
+	                          "(empty = no cross-origin permitted; '*' is rejected)",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("flock_local_dev_mode",
+	                          "When true AND bind is loopback: skip token requirement for same-Origin /ddb/* and UI catch-all requests "
+	                          "(uses synthetic principal sha256(\"__FLOCK_LOCAL_DEV__\") for connection-pool keying); off by default",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+
 	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
 	// existing duckdb-ui tooling/docs still apply. The local-port
 	// setting from upstream UI is intentionally NOT registered —

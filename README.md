@@ -22,13 +22,23 @@ session pool and auth model.
 > shared `FlockHttpServer` + `flock_serve` / `flock_stop` / `flock_wait`
 > lifecycle + `/health` and `/info`; PR-3 vendored `duckdb-ui` and wired
 > `UiHandlers` against the shared server (`/ddb/*`, `/localEvents`,
-> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`).
+> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`); **PR-4** added
+> HMAC-signed `flock_session` cookie auth (`POST /auth/login` /
+> `POST /auth/logout`), the SPEC §7 cookie-aware gate on `/ddb/*`
+> + `/localEvents` + the UI catch-all, principal-scoped UI connection
+> pool, and the `flock_cors_origins` allow-list (replaces the wildcard
+> CORS on `/info` and `/quack`; `flock_serve` refuses to start on
+> `'*'`). The cookie signing key is **ephemeral random per process**
+> in v0.1 — restart logs everyone out, by design (see SPEC §7).
 >
-> **UI is local-dev-only until PR-4.** The `/ddb/*` routes use upstream
-> UI's same-Origin check (allowed Origins = loopback + bind host),
-> NOT the SPEC §7 flock cookie-auth flow. Don't expose the server on
-> a public bind address until PR-4 ships the cookie HMAC + login
-> wrapper.
+> The browser flow now: open `http://localhost:9494/`, paste the token
+> printed by `flock_serve()`, the page POSTs to `/auth/login`, sets a
+> `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
+> request proxies through to `ui.duckdb.org`. For local dev only,
+> `SET GLOBAL flock_local_dev_mode = true` (with bind on loopback)
+> skips the token-paste step and uses a synthetic
+> `sha256("__FLOCK_LOCAL_DEV__")` principal so the connection-pool
+> isolation invariant still holds.
 >
 > Still pending: the `/sql` JSON endpoint (PR-5), admin handlers
 > (PR-6). Examples below describe the eventual API.
@@ -296,8 +306,8 @@ password.
 - **Public routes:** `GET /health`, `GET /ready`, `GET /info`, `GET /.*` (UI assets), and `OPTIONS /quack` (CORS preflight). Everything else requires authentication.
 - **Browser-origin requests do NOT bypass token auth.** The `Origin` check is CSRF defence; the auth cookie (issued by `POST /auth/login`) carries identity.
 - **`/localToken`** (used to bridge MotherDuck auth into the local UI) is automatically disabled when bound to a non-loopback address.
-- **For network exposure**, front flock with nginx or Caddy doing TLS termination — recipe in [`docs/REVERSE_PROXY.md`](./docs/REVERSE_PROXY.md).
-- **CORS** is blocked by default. Allow specific origins via `flock_cors_origins`.
+- **For network exposure**, front flock with nginx or Caddy doing TLS termination — recipe in [`docs/REVERSE_PROXY.md`](./docs/REVERSE_PROXY.md). Your reverse proxy **must** forward `X-Forwarded-Proto: https` (or the browser's request must have `Origin: https://…`) so flock sets the `Secure` attribute on issued `flock_session` cookies. Without that header, cookies are issued without `Secure`, which is acceptable on plain-HTTP loopback dev but unsafe over a public HTTPS deployment. nginx default config (`proxy_set_header X-Forwarded-Proto $scheme;`) does the right thing.
+- **CORS** is blocked by default. Allow specific origins via `flock_cors_origins`. The setting accepts a comma-separated list of `scheme://host[:port]` entries (no path, no query, no fragment, no trailing slash); `flock_serve` refuses to start if it sees `'*'` or a malformed entry.
 
 Authentication and authorization are **two pluggable SQL functions**:
 

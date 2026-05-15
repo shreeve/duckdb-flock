@@ -296,28 +296,31 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 void QuackHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	auto *self = this;
 
-	// CORS preflight. Public — no auth, no body. Identical to upstream.
-	//
-	// TODO PR-4 (auth-cookie): wildcard origin is incompatible with
-	// credentialed requests per the W3C CORS spec, and SPEC §7
-	// explicitly forbids it once cookies are involved. PR-2 keeps
-	// the upstream wildcard for /quack-only compatibility (no cookies
-	// flow through /quack); PR-4 will refactor this when cookie auth
-	// arrives, replacing `*` with the configured `flock_cors_origins`
-	// allow-list.
-	http.Options("/quack", [](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
-		res.set_header("Access-Control-Allow-Origin", "*");
-		res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-		res.set_header("Access-Control-Allow-Headers", "*");
-		res.status = 204;
-	});
+	// PR-4: OPTIONS /quack is owned by AuthHandlers, which uses the
+	// flock_cors_origins allow-list (W3C forbids wildcard origin with
+	// credentialed requests; SPEC §7). Don't register a wildcard
+	// handler here — it would shadow the allow-list-aware one.
 
 	// The protocol. Each request increments the active-request counter
 	// via the ActiveRequestGuard so FlockHttpServer::Close() can drain.
-	http.Post("/quack", [self](const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res,
+	http.Post("/quack", [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
 	                           const duckdb_httplib_openssl::ContentReader &content_reader) {
 		FlockHttpServer::ActiveRequestGuard guard(self->server);
-		res.set_header("Access-Control-Allow-Origin", "*");
+		// PR-4: replace wildcard CORS with allow-list lookup. If the
+		// request Origin is in flock_cors_origins, echo the exact
+		// match (never the verbatim header). If not, omit the header
+		// entirely — the browser will block the cross-origin response.
+		// Non-browser clients (the common case for /quack) don't send
+		// Origin and aren't affected.
+		auto request_origin = req.get_header_value("Origin");
+		if (!request_origin.empty()) {
+			auto decision = self->auth.ResolveCorsOrigin(request_origin);
+			if (decision.allowed) {
+				res.set_header("Access-Control-Allow-Origin", decision.origin);
+				res.set_header("Access-Control-Allow-Credentials", "true");
+				res.set_header("Vary", "Origin");
+			}
+		}
 		MemoryStream stream;
 		content_reader([&](const char *data, size_t data_length) {
 			stream.WriteData((data_ptr_t)data, data_length);
