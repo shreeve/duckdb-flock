@@ -79,7 +79,14 @@ public:
 
 	// Generate a fresh CSPRNG-backed 16-byte (128-bit) session id, hex-encoded
 	// (32 chars). Lazy-initializes the RNG via db.GetEncryptionUtil() on first
-	// call. Thread-safe; the rng_mutex guards lazy-init only — actual byte
+	// call — which in DuckDB's default configuration auto-loads httpfs and
+	// routes through its OpenSSL-backed EncryptionUtil (the only alternatives
+	// are deliberately insecure mbedTLS Mersenne-Twister fallbacks gated behind
+	// force_mbedtls_unsafe='true', or outright failure in read-only mode). So
+	// this is practically OpenSSL's RAND_bytes via httpfs, even though we
+	// don't link OpenSSL for this particular call. See the parallel comment
+	// on AuthManager::GenerateRandomToken in src/include/flock_auth.hpp.
+	// Thread-safe; the rng_mutex guards lazy-init only — actual byte
 	// generation is single-call into DuckDB's encryption util.
 	string GenerateSessionId();
 
