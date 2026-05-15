@@ -96,11 +96,18 @@ public:
 	static void ValidateToken(const string &token);
 
 	// CSPRNG-backed 16-byte (128-bit) token, hex-encoded (32 chars).
-	// Uses db.GetEncryptionUtil() — not OpenSSL — because that's what
-	// upstream uses and it's already wired up. PR-4's flock_crypto.cpp
-	// would let us route this through OpenSSL's RAND_bytes, but for
-	// now we leave it unchanged to keep the diff small; both are
-	// CSPRNG-grade.
+	// Delegates to db.GetEncryptionUtil(), which in DuckDB's default
+	// configuration auto-loads the httpfs extension and uses its
+	// OpenSSL-backed EncryptionUtil — so this IS transitively
+	// OpenSSL's RAND_bytes; we just don't link OpenSSL ourselves for
+	// THIS call (PR-4's flock_crypto.cpp does link and use OpenSSL
+	// directly for cookie signing key + nonces, with no httpfs
+	// coupling). The only non-OpenSSL paths inside DuckDB's encryption
+	// dispatch are deliberately insecure (force_mbedtls_unsafe='true'
+	// routes through mbedTLS's Mersenne-Twister fallback — explicitly
+	// NOT a CSPRNG) or fail outright (read-only mode throws
+	// InvalidConfigurationException). So "uses GetEncryptionUtil"
+	// practically means "uses OpenSSL via httpfs."
 	static string GenerateRandomToken(DatabaseInstance &db);
 
 	// Run the authentication callback against a transient Connection.
