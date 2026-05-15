@@ -38,6 +38,7 @@ incrementally.
 | **PR-5** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. | Admin handlers. |
 | **PR-6** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__FLOCK_ADMIN__:resource:action` authz integration. | |
 | **PR-7+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
+| **PR-10b (post-PR-7)** | OpenSSL / cpp-httplib architectural cleanup. Rewrite `HandleProxyGet` to use `HTTPUtil` (libcurl-via-httpfs) instead of `httplib::Client`; rewrite `flock_crypto.cpp` to wrap `MbedTlsWrapper::ComputeSha256Hash` + `Hmac256` instead of OpenSSL `SHA256`/`HMAC`; add an in-process bounded asset cache (~150 LOC) with ETag/Cache-Control passthrough on the proxy path; migrate cpp-httplib namespace `duckdb_httplib_openssl::` → plain `duckdb_httplib::`; drop `find_package(OpenSSL REQUIRED)` + `target_link_libraries(... OpenSSL::SSL OpenSSL::Crypto)` from CMakeLists; expose `flock_crypto_selftest()` SQL function for the mbedTLS ABI smoke test. CSPRNG keeps using `db.GetEncryptionUtil()` (httpfs is an unavoidable runtime dep anyway). vcpkg.json's `["openssl", "curl"]` entries STAY (the bundled httpfs sibling extension built by `extension_config.cmake:16-19` needs both — empirically confirmed when an attempted PR-9 to drop `curl` broke the build). | Anything that affects wire format. The credential-strip allow-list invariant from PR-8 must carry over to the HTTPUtil-based proxy. |
 
 When changing code, **keep docs and tests consistent with the current
 implementation status**. Don't promise anything in a release that PR-N
@@ -223,6 +224,57 @@ Two follow-up TODOs captured in code at PR-4 merge:
    should add CSP `default-src 'self'; script-src 'nonce-<random>';`
    when the SQL endpoint adds error pages with potentially-tainted
    strings.
+
+### PR-8 acceptance closure (closed)
+
+PR-8 was a security regression fix on the PR-4 cookie auth, surfaced
+by GPT-5.5 round-13 architectural review. The pre-PR-4 `HandleProxyGet`
+forwarded the entire browser `Cookie` header to `ui.duckdb.org` so
+MotherDuck's domain cookies could pass through. PR-4 introduced our
+own `flock_session=v1.<principal_hex>...` cookie under flock's origin;
+the browser sends it on every request to flock, including
+`/assets/*`, and the old passthrough forwarded it to `ui.duckdb.org`
+— leaking flock auth material to a third-party origin.
+
+- [x] `HandleProxyGet` rewritten with strict allow-list: forwards
+      only `Accept`, `Accept-Encoding`, `Accept-Language`,
+      `If-None-Match`, `If-Modified-Since`, `Range`. Never
+      `Cookie`, `Authorization`, `X-Flock-Token`, `X-Flock-Session-Id`,
+      `Origin`, or `Sec-*` headers.
+- [x] `scripts/golden-cookie-auth.sh` extended (11 → 14 assertions).
+      New fixture: tiny inline Python listener acting as a fake
+      `ui.duckdb.org` that captures whatever flock proxies upstream.
+      Three scenarios cover all three auth credential types
+      (Cookie, Bearer, X-Flock-Token); each asserts the credential
+      itself does NOT leak upstream while allow-listed asset-fetch
+      headers DO pass through.
+- [x] SPEC §8 rewritten with the credential-strip allow-list as a
+      named invariant, not just an implementation detail.
+- [x] Codified for future change: any rewrite of `HandleProxyGet`
+      (including the planned post-PR-7 `HTTPUtil` rewrite) MUST
+      preserve the same allow-list invariant. Both
+      `src/ui/ui_handlers.cpp` and SPEC §8 carry the load-bearing
+      comment.
+
+### PR-9: CANCELLED — `curl` is required by httpfs sibling build
+
+A planned PR-9 to drop `"curl"` from `vcpkg.json` was cancelled when
+`make release` immediately broke:
+
+```text
+No rule to make target `vcpkg_installed/arm64-osx/lib/libcurl.a',
+  needed by `extension/httpfs/httpfs.duckdb_extension'
+```
+
+`extension_config.cmake:16-19` builds httpfs as a sibling extension so
+flock's tests (specifically the PR-1.5 `/quack` runtime roundtrip in
+`test/sql/flock.test`, which exercises auto-loading httpfs) work
+end-to-end in CI. httpfs's own source needs `libcurl` for HTTP and
+`libssl`/`libcrypto` for HTTPS / S3 signing. So `vcpkg.json`'s
+`["openssl", "curl"]` list is **not dead weight** — both are required
+by the bundled httpfs build. Same constraint applies to the planned
+post-PR-7 OpenSSL cleanup: flock can stop linking libssl/libcrypto
+**directly**, but vcpkg.json's `openssl` entry stays for httpfs.
 
 ## Critical rules — read first
 
