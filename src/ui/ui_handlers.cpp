@@ -34,7 +34,11 @@
 #include "version.hpp"
 #include "watcher.hpp"
 
+#include "flock_auth.hpp"
+#include "flock_crypto.hpp"
 #include "flock_http_server.hpp"
+
+#include "duckdb/main/config.hpp"
 
 #include <duckdb/common/http_util.hpp>
 #include <duckdb/common/serializer/binary_serializer.hpp>
@@ -61,8 +65,9 @@ const char *UiHandlers::UiExtensionVersion() {
 	return UI_EXTENSION_VERSION;
 }
 
-UiHandlers::UiHandlers(FlockHttpServer &server_p, weak_ptr<DatabaseInstance> db_p, ClientContext &context)
-    : server(server_p), ddb_instance(std::move(db_p)) {
+UiHandlers::UiHandlers(FlockHttpServer &server_p, AuthManager &auth_p, weak_ptr<DatabaseInstance> db_p,
+                       ClientContext &context)
+    : server(server_p), auth(auth_p), ddb_instance(std::move(db_p)) {
 	remote_url = GetRemoteUrl(context);
 	allowed_origins = ComputeAllowedOrigins();
 	local_url_prefix = ComputeLocalUrlPrefix();
@@ -148,6 +153,153 @@ bool UiHandlers::IsAllowedOrigin(const std::string &origin) const {
 bool UiHandlers::IsBoundLocally() const {
 	auto host = server.ListenUri().Host();
 	return host == "localhost" || host == "127.0.0.1" || host == "::1";
+}
+
+bool UiHandlers::LocalDevMode() const {
+	auto db = ddb_instance.lock();
+	if (!db) {
+		return false;
+	}
+	Value setting_val;
+	auto &config = DBConfig::GetConfig(*db);
+	if (!config.TryGetCurrentSetting("flock_local_dev_mode", setting_val) || setting_val.IsNull()) {
+		return false;
+	}
+	try {
+		return setting_val.GetValue<bool>();
+	} catch (...) {
+		return false;
+	}
+}
+
+namespace {
+
+// Synthetic principal id used when flock_local_dev_mode bypasses
+// real authentication. Derived as sha256("__FLOCK_LOCAL_DEV__") so
+// it has the same shape (64 lowercase hex chars) as a real
+// principal_id and the connection-pool keying logic doesn't need
+// to special-case it.
+const std::string &LocalDevPrincipalId() {
+	static const std::string id = duckdb::flock_crypto::Sha256Hex("__FLOCK_LOCAL_DEV__");
+	return id;
+}
+
+// Minimal flock login page. Inline HTML+CSS+JS so we don't need a
+// separate asset pipeline. The page POSTs the user-pasted token to
+// /auth/login as JSON; on 200 it does window.location.reload() so
+// the cookie-bearing reload hits the cookie-gated catch-all and
+// proxies through to the real UI.
+//
+// Kept deliberately minimal: no external deps, no fonts, no
+// frameworks. ~70 lines total. Substantive UX work (token rotation,
+// multi-user, etc.) is post-v0.1 (SPEC §15 q4).
+const char *kFlockLoginPage = R"FLOCK(<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>flock — Sign in</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+         display: grid; place-items: center; min-height: 100vh; margin: 0;
+         background: #fafafa; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #18181b; color: #fafafa; }
+    input { background: #27272a; color: #fafafa; border-color: #3f3f46; }
+    .card { background: #27272a; }
+  }
+  .card { background: white; padding: 2rem; border-radius: 12px;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+          width: min(420px, 90vw); }
+  h1 { margin: 0 0 0.5rem; font-size: 1.5rem; }
+  p { margin: 0.25rem 0 1.25rem; opacity: 0.75; font-size: 0.95rem; }
+  label { display: block; margin-bottom: 0.5rem; font-weight: 500; }
+  input[type="password"] { width: 100%; padding: 0.625rem 0.75rem;
+                            border: 1px solid #d4d4d8; border-radius: 8px;
+                            font-size: 1rem; box-sizing: border-box; }
+  button { width: 100%; margin-top: 1rem; padding: 0.625rem;
+           background: #18181b; color: white; border: 0; border-radius: 8px;
+           font-size: 1rem; font-weight: 500; cursor: pointer; }
+  button:hover { background: #27272a; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .err { color: #dc2626; font-size: 0.875rem; margin-top: 0.75rem;
+         min-height: 1.2em; }
+</style>
+</head>
+<body>
+<form class="card" id="f">
+  <h1>flock</h1>
+  <p>Paste the token printed by <code>flock_serve()</code>.</p>
+  <label for="t">Token</label>
+  <input id="t" type="password" autocomplete="off" required autofocus>
+  <button id="b" type="submit">Sign in</button>
+  <div class="err" id="e"></div>
+</form>
+<script>
+  const f=document.getElementById('f'),b=document.getElementById('b'),
+        t=document.getElementById('t'),e=document.getElementById('e');
+  f.addEventListener('submit', async (ev)=>{
+    ev.preventDefault();
+    e.textContent=''; b.disabled=true;
+    try {
+      const r=await fetch('/auth/login',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        credentials:'same-origin',
+        body:JSON.stringify({token:t.value})});
+      if (r.ok) { window.location.reload(); return; }
+      const j=await r.json().catch(()=>({}));
+      e.textContent=j.message||('Sign in failed ('+r.status+')');
+    } catch(err) { e.textContent='Network error: '+err.message; }
+    b.disabled=false;
+  });
+</script>
+</body>
+</html>
+)FLOCK";
+
+} // namespace
+
+std::string UiHandlers::ScopedConnectionKey(const std::string &principal_id, const std::string &connection_name) {
+	// NUL byte as separator: connection_name is user-controlled and
+	// could contain '/', '_', etc., so we need a delimiter that
+	// CAN'T appear in either part. principal_id is pure hex so it
+	// definitely won't contain '\0'; an attacker would also have to
+	// inject '\0' into an HTTP header value, which httplib rejects
+	// at parse time (per HTTP/1.1 spec).
+	std::string out;
+	out.reserve(principal_id.size() + 1 + connection_name.size());
+	out.append(principal_id);
+	out.push_back('\0');
+	out.append(connection_name);
+	return out;
+}
+
+AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool require_origin_allowed) {
+	// Try the standard cookie/bearer/X-Flock-Token path. We pass a
+	// synthetic session id ("__FLOCK_AUTH__:ddb") so per-request
+	// authz hooks can pattern-match on it if needed; AuthManager
+	// only uses it for prepared-statement parameter binding.
+	auto result = auth.AuthenticateRequest(req, "__FLOCK_AUTH__:ddb");
+	if (result.ok) {
+		return result;
+	}
+	// Local-dev escape — only when ALL of:
+	//   - flock_local_dev_mode = true
+	//   - bind host is loopback
+	//   - (if require_origin_allowed) the request's Origin is in
+	//     our allowed-origins set
+	if (!LocalDevMode() || !IsBoundLocally()) {
+		return result;
+	}
+	if (require_origin_allowed && !IsAllowedOrigin(req.get_header_value("Origin"))) {
+		return result;
+	}
+	AuthResult bypass;
+	bypass.ok = true;
+	bypass.principal_id = LocalDevPrincipalId();
+	bypass.source = AuthSource::kLocalDev;
+	return bypass;
 }
 
 shared_ptr<DatabaseInstance> UiHandlers::LockDatabaseInstance() {
@@ -251,6 +403,24 @@ void UiHandlers::HandleGetLocalToken(const httplib::Request &req, httplib::Respo
 }
 
 void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &res) {
+	// PR-4: cookie-gated catch-all. Without a valid credential:
+	//   - GET /  → serve the flock login page (200 text/html). The
+	//     page POSTs to /auth/login and reloads on success.
+	//   - GET /anything-else → 401 plain text. Never proxy assets
+	//     for an unauthenticated client; that would let the upstream
+	//     UI partially load and confuse the login flow.
+	auto authn = AuthorizeUiRequest(req, /*require_origin_allowed=*/false);
+	if (!authn.ok) {
+		if (req.path == "/" || req.path.empty()) {
+			res.status = 200;
+			res.set_content(kFlockLoginPage, "text/html; charset=utf-8");
+		} else {
+			res.status = 401;
+			res.set_content("Unauthorized — sign in at /\n", "text/plain; charset=utf-8");
+		}
+		return;
+	}
+
 	// Outbound HTTPS client to remote_url (default ui.duckdb.org).
 	// TODO: Can this be created once and shared?
 	httplib::Client client(remote_url);
@@ -291,12 +461,20 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 }
 
 void UiHandlers::HandleInterrupt(const httplib::Request &req, httplib::Response &res) {
+	// PR-4: Origin check (CSRF) AND auth (cookie/bearer/local-dev).
+	// Both gates required — Origin alone is not authentication
+	// (SPEC §7 line 861 "Browser-origin requests do NOT bypass auth").
 	if (!IsAllowedOrigin(req.get_header_value("Origin"))) {
 		res.status = 401;
 		return;
 	}
+	auto authn = AuthorizeUiRequest(req, /*require_origin_allowed=*/true);
+	if (!authn.ok) {
+		res.status = 401;
+		return;
+	}
 
-	auto connection_name = req.get_header_value("X-DuckDB-UI-Connection-Name");
+	auto raw_connection_name = req.get_header_value("X-DuckDB-UI-Connection-Name");
 
 	auto db = LockDatabaseInstance();
 	if (!db) {
@@ -304,7 +482,11 @@ void UiHandlers::HandleInterrupt(const httplib::Request &req, httplib::Response 
 		return;
 	}
 
-	auto connection = UIStorageExtensionInfo::GetState(*db).FindConnection(connection_name);
+	// Principal-scoped key (round-11 blocker fix). Connection lookups
+	// must be isolated per-principal so user-controlled connection
+	// names cannot collide.
+	auto scoped_name = ScopedConnectionKey(authn.principal_id, raw_connection_name);
+	auto connection = UIStorageExtensionInfo::GetState(*db).FindConnection(scoped_name);
 	if (!connection) {
 		res.status = 404;
 		return;
@@ -326,12 +508,20 @@ void UiHandlers::HandleRun(const httplib::Request &req, httplib::Response &res,
 
 void UiHandlers::DoHandleRun(const httplib::Request &req, httplib::Response &res,
                               const httplib::ContentReader &content_reader) {
+	// PR-4: Origin (CSRF) + auth (cookie/bearer/local-dev). See
+	// HandleInterrupt for the rationale.
 	if (!IsAllowedOrigin(req.get_header_value("Origin"))) {
 		res.status = 401;
 		return;
 	}
+	auto authn = AuthorizeUiRequest(req, /*require_origin_allowed=*/true);
+	if (!authn.ok) {
+		res.status = 401;
+		return;
+	}
 
-	auto connection_name = req.get_header_value("X-DuckDB-UI-Connection-Name");
+	auto raw_connection_name = req.get_header_value("X-DuckDB-UI-Connection-Name");
+	auto connection_name = ScopedConnectionKey(authn.principal_id, raw_connection_name);
 	auto database_name_option = DecodeBase64(req.get_header_value("X-DuckDB-UI-Database-Name"));
 	auto schema_name_option = DecodeBase64(req.get_header_value("X-DuckDB-UI-Schema-Name"));
 
@@ -570,7 +760,17 @@ void UiHandlers::DoHandleRun(const httplib::Request &req, httplib::Response &res
 
 void UiHandlers::HandleTokenize(const httplib::Request &req, httplib::Response &res,
                                  const httplib::ContentReader &content_reader) {
+	// PR-4: Origin (CSRF) + auth. /ddb/tokenize returns no DB state
+	// directly but it does invoke the parser on user input — gating
+	// it the same way as /ddb/run prevents an unauth'd caller from
+	// spinning the parser on arbitrary input or fingerprinting the
+	// build via tokenizer behavior differences.
 	if (!IsAllowedOrigin(req.get_header_value("Origin"))) {
+		res.status = 401;
+		return;
+	}
+	auto authn = AuthorizeUiRequest(req, /*require_origin_allowed=*/true);
+	if (!authn.ok) {
 		res.status = 401;
 		return;
 	}
@@ -603,11 +803,27 @@ void UiHandlers::Register(duckdb_httplib_openssl::Server &http) {
 		watcher->Start();
 	}
 
-	// /localEvents — Server-Sent Events stream. The chunked content
-	// provider runs LATER (after this lambda returns), so the
-	// ActiveRequestGuard must outlive the lambda. Use a shared_ptr
-	// captured by the provider closure.
-	http.Get("/localEvents", [self](const httplib::Request &, httplib::Response &res) {
+	// /localEvents — Server-Sent Events stream. PR-4 (round-11 catch):
+	// auth-gated. An unauthenticated long-poll connection could
+	// otherwise observe catalog-change timing without ever
+	// authenticating; closing that observation channel.
+	//
+	// The chunked content provider runs LATER (after this lambda
+	// returns), so the ActiveRequestGuard must outlive the lambda.
+	// Use a shared_ptr captured by the provider closure.
+	http.Get("/localEvents", [self](const httplib::Request &req, httplib::Response &res) {
+		// SSE requests come from the browser via JS EventSource, which
+		// DOES include Origin headers. Require the Origin gate too —
+		// /localEvents has the same CSRF surface as /ddb/*.
+		if (!self->IsAllowedOrigin(req.get_header_value("Origin"))) {
+			res.status = 401;
+			return;
+		}
+		auto authn = self->AuthorizeUiRequest(req, /*require_origin_allowed=*/true);
+		if (!authn.ok) {
+			res.status = 401;
+			return;
+		}
 		auto guard = std::make_shared<FlockHttpServer::ActiveRequestGuard>(self->server);
 		res.set_chunked_content_provider("text/event-stream",
 		                                  [self, guard](size_t /* offset */, httplib::DataSink &sink) -> bool {

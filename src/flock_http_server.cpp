@@ -1,6 +1,7 @@
 #include "flock_http_server.hpp"
 
 #include "admin_handlers.hpp"
+#include "auth_handlers.hpp"
 #include "flock_auth.hpp"
 #include "flock_session.hpp"
 #include "quack_server.hpp"  // QuackHandlers
@@ -134,11 +135,27 @@ void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 		}
 	}
 
+	// PR-4: initialize CORS allow-list from settings BEFORE handler
+	// construction. This is the refuse-to-start point if the operator
+	// set flock_cors_origins='*' — we throw, which propagates to the
+	// flock_serve caller as a SQL error and the server never starts.
+	auto db_locked = db.lock();
+	if (db_locked) {
+		Value cors_setting;
+		auto &config = DBConfig::GetConfig(*db_locked);
+		if (config.TryGetCurrentSetting("flock_cors_origins", cors_setting) && !cors_setting.IsNull() &&
+		    cors_setting.type().id() == LogicalTypeId::VARCHAR) {
+			// Throws InvalidInputException on '*' or malformed entries —
+			// propagates out of flock_serve cleanly.
+			auth->InitCorsConfig(cors_setting.GetValue<string>());
+		}
+	}
+
 	// Order matters: cpp-httplib resolves routes in registration order.
 	// UiHandlers' GET /.* catch-all MUST be registered LAST or it shadows
 	// /quack, /health, /info, etc.
 
-	// QuackHandlers: /quack, OPTIONS /quack
+	// QuackHandlers: POST /quack
 	quack_handlers = make_uniq<QuackHandlers>(*this, *sessions, *auth, db);
 	quack_handlers->Register(*server);
 
@@ -146,12 +163,19 @@ void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	admin_handlers = make_uniq<AdminHandlers>(*this);
 	admin_handlers->Register(*server);
 
+	// AuthHandlers: POST /auth/login, POST /auth/logout, OPTIONS /auth/*,
+	// OPTIONS /quack. Registered AFTER QuackHandlers so OPTIONS /quack
+	// is owned by the allow-list-aware handler (QuackHandlers no longer
+	// registers an OPTIONS handler at all in PR-4).
+	auth_handlers = make_uniq<AuthHandlers>(*this, *auth);
+	auth_handlers->Register(*server);
+
 	// UiHandlers: /localEvents (SSE), /localToken, /ddb/interrupt,
 	// /ddb/run, /ddb/tokenize, GET /.* (catch-all proxy to ui.duckdb.org).
 	// Registered LAST so the catch-all doesn't shadow earlier routes.
 	// Construction also starts the catalog Watcher thread (stopped in
 	// Shutdown() during Close()).
-	ui_handlers = make_uniq<ui::UiHandlers>(*this, db, context);
+	ui_handlers = make_uniq<ui::UiHandlers>(*this, *auth, db, context);
 	ui_handlers->Register(*server);
 }
 
@@ -269,6 +293,7 @@ void FlockHttpServer::Close() {
 	// what they reference. We've drained to zero above, so no in-flight
 	// callback should be touching them.
 	ui_handlers.reset();
+	auth_handlers.reset();
 	admin_handlers.reset();
 	quack_handlers.reset();
 	server.reset();

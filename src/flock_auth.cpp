@@ -1,12 +1,26 @@
 #include "flock_auth.hpp"
 
+#include "flock_crypto.hpp"
+
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/blob.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement.hpp"
+
+// Match FlockHttpServer's openssl-enabled cpp-httplib so the
+// httplib::Request type in AuthenticateRequest's signature is the
+// same one route handlers receive. See header comment in
+// src/include/flock_http_server.hpp.
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include "httplib.hpp"
+
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 namespace duckdb {
 
@@ -25,7 +39,10 @@ void AuthManager::ValidateToken(const string &token) {
 
 namespace {
 
-constexpr idx_t kTokenBytes = 16; // 128 bits
+constexpr idx_t kTokenBytes = 16;            // 128 bits — server bearer token
+constexpr idx_t kSigningKeyBytes = 32;       // 256 bits — HMAC-SHA256 key per RFC 4868
+constexpr idx_t kCookieNonceBytes = 16;      // 128 bits — per-cookie randomness
+constexpr const char *kCookieVersion = "v1"; // bump when format changes
 
 string HexEncode(const data_t *bytes, idx_t n) {
 	string result(n * 2, '\0');
@@ -36,10 +53,6 @@ string HexEncode(const data_t *bytes, idx_t n) {
 	return result;
 }
 
-// Read a VARCHAR setting from the DBConfig. The auth/authz function
-// names are registered as VARCHAR DBConfig options at extension load
-// time, so the lookup is expected to succeed; an empty string means
-// no callback is configured (which the caller treats as deny).
 string GetSettingString(DatabaseInstance &db, const string &setting_name) {
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(db);
@@ -52,23 +65,6 @@ string GetSettingString(DatabaseInstance &db, const string &setting_name) {
 	return setting_str;
 }
 
-// Run the auth/authz query against a transient Connection.
-//
-// The SQL string contains `?` placeholders; `values` are bound as
-// prepared statement parameters via PreparedStatement::Execute(vector<Value>&).
-// Critical: do NOT format `values` into the SQL string — the auth
-// callback name comes from a DBConfig setting (formatted via %s), but
-// the user-controlled session id, client token, and query text are
-// always parameter-bound to defeat injection.
-//
-// Returns true iff the query succeeds AND the (0, 0) result is a
-// non-NULL boolean true. Any other path (lookup miss, query error,
-// NULL/non-bool result, exception) returns false.
-//
-// Note: takes `values` by value (not const-ref) because
-// PreparedStatement::Execute requires a mutable lvalue reference. The
-// caller passes a vector that's local to the per-request call anyway,
-// so the move-or-copy is cheap.
 bool EvaluateAuthQuery(DatabaseInstance &db, const string &sql, vector<Value> values) {
 	try {
 		Connection dummy_connection(db);
@@ -94,6 +90,77 @@ bool EvaluateAuthQuery(DatabaseInstance &db, const string &sql, vector<Value> va
 	}
 }
 
+// Trim ASCII whitespace from both ends. cpp-httplib's headers can
+// arrive with leading spaces after ":"; settings strings can come
+// from operators with stray whitespace.
+string TrimAscii(const string &s) {
+	size_t start = 0;
+	while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) {
+		++start;
+	}
+	size_t end = s.size();
+	while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+		--end;
+	}
+	return s.substr(start, end - start);
+}
+
+// Extract the value of a specific cookie name from a Cookie header.
+// Cookie header format: "name1=value1; name2=value2; ...". Returns
+// empty string when the named cookie is not present.
+string ExtractCookie(const string &cookie_header, const string &name) {
+	if (cookie_header.empty() || name.empty()) {
+		return string();
+	}
+	size_t pos = 0;
+	while (pos < cookie_header.size()) {
+		// Skip leading whitespace.
+		while (pos < cookie_header.size() && std::isspace(static_cast<unsigned char>(cookie_header[pos]))) {
+			++pos;
+		}
+		size_t eq = cookie_header.find('=', pos);
+		size_t semi = cookie_header.find(';', pos);
+		if (eq == string::npos || (semi != string::npos && eq > semi)) {
+			break;
+		}
+		auto cur_name = cookie_header.substr(pos, eq - pos);
+		size_t value_start = eq + 1;
+		size_t value_end = (semi == string::npos) ? cookie_header.size() : semi;
+		if (cur_name == name) {
+			return cookie_header.substr(value_start, value_end - value_start);
+		}
+		if (semi == string::npos) {
+			break;
+		}
+		pos = semi + 1;
+	}
+	return string();
+}
+
+// Validate principal_hex format (64 lowercase hex chars). We never
+// trust decoded cookie segments without re-validating shape — even
+// after HMAC verifies, malformed payloads should be rejected so
+// downstream logic doesn't see surprises.
+bool IsValidPrincipalHex(const string &s) {
+	if (s.size() != 64) {
+		return false;
+	}
+	for (char c : s) {
+		bool is_digit = (c >= '0' && c <= '9');
+		bool is_lower_hex = (c >= 'a' && c <= 'f');
+		if (!is_digit && !is_lower_hex) {
+			return false;
+		}
+	}
+	return true;
+}
+
+uint64_t NowUnix() {
+	return static_cast<uint64_t>(
+	    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+	        .count());
+}
+
 } // namespace
 
 string AuthManager::GenerateRandomToken(DatabaseInstance &db) {
@@ -116,9 +183,6 @@ bool AuthManager::RunAuthentication(const string &session_id, const string &clie
 	if (fn_name.empty()) {
 		return false;
 	}
-	// Function-name from setting is interpolated (it's a SQL identifier,
-	// not user-controlled data). Session id, client token, server token are
-	// bound as prepared parameters.
 	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(client_token), Value(server_token)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);
@@ -136,6 +200,246 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	auto sql = StringUtil::Format("SELECT %s(?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(query)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);
+}
+
+const std::vector<uint8_t> &AuthManager::CookieSigningKey() {
+	std::lock_guard<std::mutex> lock(signing_key_mutex);
+	if (signing_key.empty()) {
+		// First use — generate ephemeral 32 random bytes. RAND_bytes
+		// failure throws std::runtime_error, which propagates as a
+		// 500 to whichever request triggered the first cookie issue/
+		// verify. Operationally that's correct: with a broken RNG we
+		// can't safely auth anyone.
+		signing_key = flock_crypto::RandomBytes(kSigningKeyBytes);
+	}
+	return signing_key;
+}
+
+string AuthManager::IssueCookie(const string &principal_hex, uint64_t ttl_s) {
+	if (!IsValidPrincipalHex(principal_hex)) {
+		// Should never happen in practice — callers always pass the
+		// output of PrincipalIdHex(). Throw rather than silently
+		// returning a malformed cookie.
+		throw InvalidInputException("IssueCookie: principal_hex must be 64 lowercase hex chars");
+	}
+	auto expires_unix = NowUnix() + ttl_s;
+	auto nonce = flock_crypto::RandomBytes(kCookieNonceBytes);
+
+	auto seg1 = flock_crypto::Base64UrlEncode(principal_hex);                                  // payload identity
+	auto seg2 = flock_crypto::Base64UrlEncode(std::to_string(expires_unix));                   // ASCII unix seconds
+	auto seg3 = flock_crypto::Base64UrlEncode(nonce);                                          // anti-replay aid
+
+	string mac_input = string(kCookieVersion) + "." + seg1 + "." + seg2 + "." + seg3;
+	auto seg4 = flock_crypto::HmacSha256B64Url(CookieSigningKey(), mac_input);
+
+	return mac_input + "." + seg4;
+}
+
+AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
+	AuthResult result;
+	if (cookie_value.empty()) {
+		result.error_code = "MISSING_COOKIE";
+		return result;
+	}
+	// Split on '.' into exactly 5 segments: version + 3 payload + mac.
+	std::vector<string> segments;
+	segments.reserve(5);
+	size_t start = 0;
+	for (size_t i = 0; i < cookie_value.size(); ++i) {
+		if (cookie_value[i] == '.') {
+			segments.push_back(cookie_value.substr(start, i - start));
+			start = i + 1;
+		}
+	}
+	segments.push_back(cookie_value.substr(start));
+	if (segments.size() != 5) {
+		result.error_code = "BAD_COOKIE_FORMAT";
+		return result;
+	}
+	if (segments[0] != kCookieVersion) {
+		result.error_code = "BAD_COOKIE_VERSION";
+		return result;
+	}
+
+	// Recompute HMAC over the on-the-wire prefix bytes (NOT a
+	// re-encoded reconstruction). This is critical: any byte-for-byte
+	// difference between issuance and verification (e.g. different
+	// base64url canonicalization) would silently break verification.
+	string mac_input =
+	    segments[0] + "." + segments[1] + "." + segments[2] + "." + segments[3];
+	std::vector<uint8_t> expected_mac;
+	std::vector<uint8_t> actual_mac;
+	try {
+		actual_mac = flock_crypto::Base64UrlDecode(segments[4]);
+		expected_mac = flock_crypto::HmacSha256(CookieSigningKey(), mac_input);
+	} catch (...) {
+		result.error_code = "BAD_COOKIE_FORMAT";
+		return result;
+	}
+	if (!flock_crypto::ConstantTimeEqual(expected_mac, actual_mac)) {
+		result.error_code = "BAD_COOKIE_SIG";
+		return result;
+	}
+
+	// Decode payload segments. Reject malformed shapes even after
+	// successful HMAC verification: an attacker who somehow got the
+	// signing key would still hit these checks.
+	string principal_hex;
+	uint64_t expires_unix = 0;
+	try {
+		auto p_bytes = flock_crypto::Base64UrlDecode(segments[1]);
+		principal_hex.assign(reinterpret_cast<const char *>(p_bytes.data()), p_bytes.size());
+		auto e_bytes = flock_crypto::Base64UrlDecode(segments[2]);
+		string e_str(reinterpret_cast<const char *>(e_bytes.data()), e_bytes.size());
+		expires_unix = std::stoull(e_str);
+	} catch (...) {
+		result.error_code = "BAD_COOKIE_PAYLOAD";
+		return result;
+	}
+	if (!IsValidPrincipalHex(principal_hex)) {
+		result.error_code = "BAD_COOKIE_PAYLOAD";
+		return result;
+	}
+	if (NowUnix() > expires_unix) {
+		result.error_code = "COOKIE_EXPIRED";
+		return result;
+	}
+
+	result.ok = true;
+	result.principal_id = principal_hex;
+	result.source = AuthSource::kCookie;
+	return result;
+}
+
+AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
+                                            const string &synthetic_session_id) {
+	auto try_explicit_token = [&](const string &header_name, AuthSource source,
+	                              const string &raw_value) -> AuthResult {
+		AuthResult ar;
+		ar.source = source;
+		string token = raw_value;
+		if (source == AuthSource::kBearer) {
+			// "Bearer <token>" — case-sensitive scheme per RFC 6750.
+			constexpr const char *kBearerPrefix = "Bearer ";
+			constexpr size_t kBearerPrefixLen = 7;
+			if (token.size() < kBearerPrefixLen ||
+			    token.compare(0, kBearerPrefixLen, kBearerPrefix) != 0) {
+				ar.error_code = "MISSING_CREDENTIAL";
+				return ar;
+			}
+			token = TrimAscii(token.substr(kBearerPrefixLen));
+		} else {
+			token = TrimAscii(token);
+		}
+		if (token.empty()) {
+			ar.error_code = "MISSING_CREDENTIAL";
+			return ar;
+		}
+		if (!RunAuthentication(synthetic_session_id, token)) {
+			ar.error_code = "INVALID_TOKEN";
+			return ar;
+		}
+		ar.ok = true;
+		ar.principal_id = flock_crypto::PrincipalIdHex(token);
+		return ar;
+	};
+
+	// 1. Authorization: Bearer <token> — explicit and highest priority.
+	//    Do NOT fall back to cookie on failure (round-11 review): a
+	//    caller that supplied an explicit credential and got it wrong
+	//    must see a 401, not silently authenticate as a different
+	//    principal via ambient browser state.
+	auto auth_header = req.get_header_value("Authorization");
+	if (!auth_header.empty()) {
+		return try_explicit_token("Authorization", AuthSource::kBearer, auth_header);
+	}
+
+	// 2. X-Flock-Token — explicit alternative for environments where
+	//    Authorization is awkward (e.g. some proxies strip it).
+	auto x_flock = req.get_header_value("X-Flock-Token");
+	if (!x_flock.empty()) {
+		return try_explicit_token("X-Flock-Token", AuthSource::kXFlockToken, x_flock);
+	}
+
+	// 3. Cookie: flock_session=<value> — implicit; for the in-browser
+	//    UI flow.
+	auto cookie_header = req.get_header_value("Cookie");
+	if (!cookie_header.empty()) {
+		auto cookie_value = ExtractCookie(cookie_header, "flock_session");
+		if (!cookie_value.empty()) {
+			return VerifyCookie(cookie_value);
+		}
+	}
+
+	AuthResult none;
+	none.error_code = "MISSING_CREDENTIAL";
+	return none;
+}
+
+void AuthManager::ValidateCorsOrigin(const string &origin) {
+	if (origin.empty()) {
+		throw InvalidInputException("flock_cors_origins entry is empty");
+	}
+	// Must be scheme://host[:port], no path, no query, no fragment.
+	// We don't fully validate URL syntax — we just enforce the shape
+	// the browser sends in Origin headers (which is exactly that).
+	auto scheme_end = origin.find("://");
+	if (scheme_end == string::npos || scheme_end == 0) {
+		throw InvalidInputException("flock_cors_origins entry '%s' has no scheme://host", origin);
+	}
+	auto rest = origin.substr(scheme_end + 3);
+	if (rest.empty() ||
+	    rest.find('/') != string::npos ||
+	    rest.find('?') != string::npos ||
+	    rest.find('#') != string::npos) {
+		throw InvalidInputException(
+		    "flock_cors_origins entry '%s' must be scheme://host[:port] with no path/query/fragment",
+		    origin);
+	}
+	auto scheme = origin.substr(0, scheme_end);
+	if (scheme != "http" && scheme != "https") {
+		throw InvalidInputException("flock_cors_origins entry '%s' must use http or https scheme", origin);
+	}
+}
+
+void AuthManager::InitCorsConfig(const string &cors_origins_setting) {
+	cors_allowed_origins.clear();
+	auto trimmed_setting = TrimAscii(cors_origins_setting);
+	if (trimmed_setting.empty()) {
+		return;
+	}
+	if (trimmed_setting == "*") {
+		// SPEC §7: "the server refuses to start if flock_cors_origins='*'".
+		// Wildcard origin combined with credentials is forbidden by
+		// CORS spec and by us — silently honoring it would be a
+		// browser-side privilege escalation.
+		throw InvalidInputException("flock_cors_origins='*' is forbidden (wildcard with credentials is "
+		                            "unsafe). List specific origins instead.");
+	}
+	std::vector<string> parts = StringUtil::Split(trimmed_setting, ",");
+	for (auto &raw : parts) {
+		auto entry = TrimAscii(raw);
+		if (entry.empty()) {
+			continue;
+		}
+		ValidateCorsOrigin(entry);
+		cors_allowed_origins.push_back(entry);
+	}
+}
+
+CorsDecision AuthManager::ResolveCorsOrigin(const string &request_origin) const {
+	CorsDecision decision;
+	if (request_origin.empty() || cors_allowed_origins.empty()) {
+		return decision;
+	}
+	for (const auto &allowed : cors_allowed_origins) {
+		if (request_origin == allowed) {
+			decision.allowed = true;
+			decision.origin = allowed;
+			return decision;
+		}
+	}
+	return decision;
 }
 
 } // namespace duckdb

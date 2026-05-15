@@ -59,6 +59,7 @@ class SessionManager;
 class AuthManager;
 class QuackHandlers;
 class AdminHandlers;
+class AuthHandlers;
 namespace ui {
 class UiHandlers;
 }
@@ -204,6 +205,7 @@ private:
 	// ~FlockHttpServer (which requires Close() to have drained workers first).
 	unique_ptr<QuackHandlers> quack_handlers;
 	unique_ptr<AdminHandlers> admin_handlers;
+	unique_ptr<AuthHandlers> auth_handlers;
 	unique_ptr<ui::UiHandlers> ui_handlers;
 
 	// Listener-thread entry. Catches everything so an exception in the

@@ -25,16 +25,44 @@
 //                                    // BEFORE the active-request drain — the
 //                                    // Watcher thread isn't request-scoped)
 //
-// Auth model (PR-3):
-//   - /ddb/run, /ddb/interrupt, /ddb/tokenize: Origin must match an
-//     entry in our local-allowed set ({localhost, 127.0.0.1, [::1]}
-//     plus the bind host if not 0.0.0.0).
-//   - /localToken: Referer must start with our local URL AND the
-//     bind host must be loopback (per SPEC §7).
-//   - /info, /localEvents, GET /.*: public (no auth).
+// Auth model:
 //
-// PR-4 will replace the Origin-set check with the cookie-auth flow
-// (HMAC-signed flock_session cookie + Origin == flock_cors_origins).
+//   /ddb/run, /ddb/interrupt, /ddb/tokenize, /localEvents (PR-4):
+//     - Origin must match an entry in our local-allowed set
+//       ({localhost, 127.0.0.1, [::1]} plus the bind host if not
+//       0.0.0.0). CSRF defence.
+//     - AND a valid auth credential: flock_session cookie OR
+//       Authorization: Bearer / X-Flock-Token. AuthManager runs
+//       flock_authentication_function for explicit-bearer paths;
+//       cookie verify is HMAC-only.
+//     - Local-dev bypass: flock_local_dev_mode=true + loopback bind
+//       + Origin in allowed_origins → use the synthetic principal
+//       sha256("__FLOCK_LOCAL_DEV__") so connection-pool keying still
+//       behaves like every other authenticated path.
+//
+//   /localToken: Referer must start with our local URL AND the bind
+//     host must be loopback (per SPEC §7). No cookie required —
+//     /localToken predates the cookie flow and remains gated on
+//     loopback-only.
+//
+//   GET /.* (catch-all UI proxy, PR-4):
+//     - Valid cookie/bearer OR local-dev mode → proxy to remote_url.
+//     - No valid cookie + GET /  → minimal flock login page (200).
+//     - No valid cookie + any other GET → 401 (assets shouldn't
+//       leak from a non-authenticated proxy).
+//
+//   /info: public (AdminHandlers; not registered here).
+//
+// Connection pool (PR-4 round-11 blocker fix):
+//
+//   UIStorageExtensionInfo::FindOrCreateConnection is called with a
+//   composite key principal_id + 0x00 + X-DuckDB-UI-Connection-Name.
+//   The X-DuckDB-UI-Connection-Name header is user-controlled, so a
+//   raw-name keying would let one principal collide with another by
+//   guessing/sharing a connection name. Composite keying isolates
+//   per-principal pools without changing UIStorageExtensionInfo's
+//   API (it's still keyed on a single string; the principal scoping
+//   lives in this caller).
 
 #include <functional>
 #include <memory>
@@ -56,6 +84,8 @@ namespace duckdb {
 class DatabaseInstance;
 class ClientContext;
 class FlockHttpServer;
+class AuthManager;
+struct AuthResult;
 struct HTTPParams;
 class MemoryStream;
 
@@ -66,7 +96,7 @@ class Watcher;
 
 class UiHandlers {
 public:
-	UiHandlers(FlockHttpServer &server, weak_ptr<DatabaseInstance> db, ClientContext &context);
+	UiHandlers(FlockHttpServer &server, AuthManager &auth, weak_ptr<DatabaseInstance> db, ClientContext &context);
 	~UiHandlers();
 
 	UiHandlers(const UiHandlers &) = delete;
@@ -136,6 +166,32 @@ private:
 	// /localToken returns 404 unless this is true.
 	bool IsBoundLocally() const;
 
+	// True iff the flock_local_dev_mode setting is true. Read on each
+	// call rather than memoized so operators can flip it at runtime
+	// (e.g. via `SET GLOBAL flock_local_dev_mode = true`).
+	bool LocalDevMode() const;
+
+	// Authenticate a UI request. Returns the AuthResult from
+	// AuthManager (cookie/bearer/X-Flock-Token), with one local-dev
+	// override:
+	//   if AuthenticateRequest fails, AND LocalDevMode() is true,
+	//   AND IsBoundLocally(), AND require_origin_allowed implies
+	//   IsAllowedOrigin(req.Origin), THEN return ok=true with
+	//   principal_id = sha256("__FLOCK_LOCAL_DEV__") and
+	//   source = AuthSource::kLocalDev. The synthetic principal
+	//   keeps the connection-pool keying invariant alive even with
+	//   local-dev bypass active (round-11 review).
+	AuthResult AuthorizeUiRequest(const duckdb_httplib_openssl::Request &req,
+	                              bool require_origin_allowed);
+
+	// Composite key for UIStorageExtensionInfo connection pool. Round-11
+	// blocker fix: X-DuckDB-UI-Connection-Name is user-controlled; raw
+	// keying would let principal A guess/share principal B's connection.
+	// `principal_id` MUST be a 64-char hex (real or synthetic local-dev);
+	// callers ensure this by always going through AuthorizeUiRequest.
+	static std::string ScopedConnectionKey(const std::string &principal_id,
+	                                       const std::string &connection_name);
+
 	// Computed at construction; the set of Origin header values that
 	// pass the /ddb/* same-origin check. Includes `http://localhost:N`,
 	// `http://127.0.0.1:N`, `http://[::1]:N`, plus `http://<bind_host>:N`
@@ -148,6 +204,7 @@ private:
 
 	// ---- Members ----
 	FlockHttpServer &server;
+	AuthManager &auth;
 	weak_ptr<DatabaseInstance> ddb_instance;
 
 	std::string remote_url;             // ui_remote_url setting at construction
