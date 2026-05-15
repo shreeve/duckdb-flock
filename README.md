@@ -125,9 +125,14 @@ Open `http://localhost:9494/` and you get the full DuckDB notebook:
 SQL notebooks, syntax highlighting, tab completion, query history, data
 exploration. By default, `flock` proxies the UI assets from
 `ui.duckdb.org` (matching the upstream `duckdb-ui` extension behavior).
-For air-gapped or restricted-egress deployments, set
-`flock_ui_assets = 'bundled'` to serve a snapshot embedded in the
-extension. The `/ddb/*` binary protocol works the same in either mode.
+For air-gapped or restricted-egress deployments, point
+`flock_ui_proxy_url` at an internal HTTP mirror of `ui.duckdb.org`
+(a 10-line nginx config); `flock_ui_assets = 'disabled'` opts out
+entirely. The proxy strips all flock-auth headers (`Cookie`,
+`Authorization`, `X-Flock-Token`) before forwarding upstream. A
+compiled-in `bundled` mode is planned for v0.2 if true
+no-internal-mirror air-gap demand emerges. The `/ddb/*` binary
+protocol is unaffected by the asset mode.
 
 The first time you visit, flock asks for the token printed by
 `flock_serve` and issues an HTTP-only cookie. After that, the UI works
@@ -272,7 +277,7 @@ restrictions, and HTTPS for any non-localhost target.
 - **Pluggable auth.** Token + per-connection authentication and per-query authorization, as user-supplied SQL macros. One model covers `/quack`, `/sql`, `/ddb/run`, and admin endpoints.
 - **Streaming `/sql`.** Large result sets stream as NDJSON over chunked transfer encoding.
 - **Schema-typed encoding.** `/sql` NDJSON encodes every DuckDB core type losslessly when decoded with the schema record (DECIMAL preserves width/scale, TIMESTAMP preserves precision, INTERVAL preserves all three components, BIGINT/HUGEINT as strings to dodge JS precision loss).
-- **Bundled UI assets.** No outbound network required; assets are compiled into the extension.
+- **UI assets via proxy.** Default forwards to `ui.duckdb.org`; point `flock_ui_proxy_url` at an internal mirror for restricted-egress deployments. The proxy strips all flock-auth headers from outbound requests. A compile-in `bundled` mode is planned for v0.2 (deferred from v0.1 — most "air-gap" deployments are better served by an internal HTTP mirror, which works today with no flock change).
 - **Upstream-compatible Quack.** Stock DuckDB clients work without modification.
 - **Container-ready.** Designed to be deployed as `duckdb -no-stdin -init flock-init.sql /data/db.duckdb` against a ZFS dataset.
 
@@ -401,7 +406,7 @@ All settings are regular DuckDB session/global options.
 | `flock_session_ttl_s` | `3600` | Idle session TTL |
 | `flock_query_timeout_s` | `0` | Per-query timeout (0 disables) |
 | `flock_max_request_body_bytes` | `268435456` (256 MiB) | Per-request body cap |
-| `flock_ui_assets` | `proxy` | `proxy` / `bundled` / `disabled` |
+| `flock_ui_assets` | `proxy` | `proxy` / `disabled` (v0.1; `bundled` planned for v0.2) |
 | `flock_ui_proxy_url` | `https://ui.duckdb.org` | Upstream URL when `flock_ui_assets = 'proxy'` |
 | `flock_cors_origins` | `''` | Allow-list for cross-origin browser requests |
 | `flock_log_requests` | `true` | Per-request structured log |
@@ -434,5 +439,7 @@ MIT. See [`LICENSE`](./LICENSE).
 This project is a derivative work of `duckdb-quack` and `duckdb-ui`,
 both © Stichting DuckDB Foundation, both MIT-licensed. Files
 substantially derived from those projects retain their original
-upstream MIT headers in addition to flock's. Bundled UI assets carry
-their own notices in [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).
+upstream MIT headers in addition to flock's. (When `bundled` UI
+assets land in v0.2, their notices will live in
+`THIRD_PARTY_NOTICES.md`; v0.1 ships proxy mode only and has no
+bundled assets to attribute.)

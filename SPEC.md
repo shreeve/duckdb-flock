@@ -953,28 +953,68 @@ codified in `AGENTS.md` and verified by an integration test.
 
 ## 8. UI assets
 
-flock serves the UI HTML/JS/CSS at `GET /.*` from one of three modes,
-selected by setting `flock_ui_assets`:
+flock serves the UI HTML/JS/CSS at `GET /.*` from one of two modes
+(v0.1; see "Future modes" below for what's planned post-v0.1), selected
+by setting `flock_ui_assets`:
 
 | Mode | Setting | Behavior |
 |---|---|---|
-| `proxy` (default) | `flock_ui_assets = 'proxy'` | Forwards `GET /.*` to `ui.duckdb.org` (matches upstream `duckdb-ui` behavior). Requires outbound network from the host. UI updates take effect immediately, no rebuild needed. |
-| `bundled` | `flock_ui_assets = 'bundled'` | Serves the UI from a const byte array compiled into the extension. Offline-capable. Bundle is ~10–15 MB. Refreshed by re-running `scripts/fetch-ui-assets.sh` and rebuilding the extension. Use this for air-gapped or restricted-egress deployments. |
+| `proxy` (default) | `flock_ui_assets = 'proxy'` | Forwards `GET /.*` to `ui.duckdb.org` (matches upstream `duckdb-ui` behavior). Requires outbound network from the host (or from `flock_ui_proxy_url` if pointed at an internal mirror). UI updates take effect immediately, no rebuild needed. |
 | `disabled` | `flock_ui_assets = 'disabled'` | All `GET /.*` requests return `404`. The UI doesn't load. `/sql` and `/quack` still work. Useful for headless deployments. |
 
 The proxy URL is configurable via `flock_ui_proxy_url` (default
 `https://ui.duckdb.org`) for testing, mirroring, or pointing at a fork.
+Air-gapped or restricted-egress deployments are expected to self-host
+an HTTP mirror of `ui.duckdb.org` (a 10-line nginx config) and point
+`flock_ui_proxy_url` at it. That covers the primary `bundled`-mode use
+case with significantly less complexity in flock itself.
 
-In bundled mode, `GET /config` is intercepted to inject the same
-`X-DuckDB-Version`, `X-DuckDB-Platform`, `X-DuckDB-UI-Extension-Version`
-headers the upstream UI proxy adds. The bundled assets pin to a specific
-upstream UI commit hash, recorded in `UI_ASSETS_VERSION.txt` at the repo
-root.
+### Header invariants on the proxy path
 
-> **Implementation order:** PR-3 ships `proxy` (the simpler implementation
-> — just a thin HTTPS-client wrapper around cpp-httplib, against the
-> already-linked OpenSSL). `bundled` mode lands when an air-gapped
-> deployment use case actually appears.
+flock's proxy MUST NOT forward request headers that could carry flock
+auth material to `ui.duckdb.org` (or any configured upstream). The
+proxy uses a **strict allow-list** of safe asset-fetch headers
+(`Accept`, `Accept-Encoding`, `Accept-Language`, `If-None-Match`,
+`If-Modified-Since`, `Range`); every other request header is dropped
+before the outbound request. Specifically the following are **never**
+forwarded:
+
+- `Cookie` — would leak `flock_session=v1.<principal_hex>...`
+- `Authorization` — would leak Bearer token
+- `X-Flock-Token` — same
+- `X-Flock-Session-Id` — future SQL session id
+- `Origin` — would expose the user's local flock URL upstream
+- `Sec-*` fetch-metadata headers
+
+Tested in `scripts/golden-cookie-auth.sh` (PR-8) by spawning a tiny
+mock listener, pointing `ui_remote_url` at it, and asserting the
+captured upstream request never contains any of the above.
+
+If a future need to forward an upstream-set domain cookie back to
+upstream emerges, the right shape is a **positive filter** that keeps
+only cookies upstream itself set (tracked by inspecting `Set-Cookie`
+in prior responses) — NOT a `Cookie` passthrough that includes
+whatever the browser happens to send.
+
+### Future modes (post-v0.1)
+
+A `bundled` mode (compile-in const byte array of the UI) was originally
+planned for v0.1. Per the post-PR-4 architectural review (see §14
+"Roadmap"), it has been deferred to v0.2 in favor of a smaller,
+optional in-process **bounded asset cache** (~150 LOC) on top of
+`proxy` mode that pass-throughs `ETag` / `Cache-Control` /
+`Last-Modified` and serves `304 Not Modified` revalidation against
+upstream. The browser's own HTTP cache + the in-process cache cover
+most of bundled mode's latency benefit without the bundle pipeline
+(`scripts/fetch-ui-assets.sh`, `ui_assets_data.cpp` codegen,
+`UI_ASSETS_VERSION.txt` pin, asset goldens, ~5–10 MB binary tax).
+
+> **Implementation order:** PR-3 shipped `proxy` mode against
+> ui.duckdb.org. PR-8 added the credential-strip allow-list invariant
+> on the proxy. The bounded local cache is part of the post-PR-7
+> architectural-cleanup PR (see §14). True air-gap-with-no-mirror
+> deployments — the only remaining `bundled`-only use case — are
+> deferred to v0.2 if real demand appears.
 
 The flock login wrapper described in §7 lives at `GET /` (registered
 before the catch-all and before `/ui/`). The unmodified upstream UI
@@ -1233,11 +1273,37 @@ CI runs all suites against each platform binary on every PR.
 
 Explicitly **out of scope for v0.1**, listed for record:
 
-- **`bundled` UI assets mode** — opt-in for air-gapped / restricted-egress
-  deployments. v0.1 ships with `proxy` mode (default), which forwards
-  `GET /.*` to `ui.duckdb.org` over the OpenSSL-backed cpp-httplib
-  client. The bundled-asset infrastructure (`scripts/fetch-ui-assets.sh`,
-  embed step, version pin file) lands when a real use case appears.
+- **`bundled` UI assets mode** — compile-in const byte array of the
+  UI (~10–15 MB) for air-gapped deployments with no internal mirror.
+  Originally planned for v0.1; deferred per the post-PR-4
+  architectural review on the grounds that (1) most "air-gapped"
+  deployments can self-host an internal HTTP mirror of `ui.duckdb.org`
+  and point `flock_ui_proxy_url` at it, eliminating the in-flock
+  bundle pipeline entirely, and (2) the bundle pipeline
+  (`scripts/fetch-ui-assets.sh`, `ui_assets_data.cpp` codegen,
+  `UI_ASSETS_VERSION.txt` pin, asset goldens, ~5–10 MB binary tax,
+  per-release refresh CI step) is significant complexity for the
+  shrinking residual use case. v0.2 will re-examine if a true
+  air-gap-with-no-mirror operator emerges.
+- **OpenSSL/cpp-httplib architectural cleanup** — flock currently pays
+  the OpenSSL dependency twice: once via `cpp-httplib`'s OpenSSL
+  variant (used only for the UI proxy outbound HTTPS in
+  `HandleProxyGet`) and once via httpfs (auto-loaded for CSPRNG via
+  `db.GetEncryptionUtil()` and for the `ATTACH 'quack:host'` outbound
+  via `HTTPUtil`). The plan: rewrite `HandleProxyGet` to use
+  `HTTPUtil`, rewrite `flock_crypto.cpp` to wrap
+  `duckdb_mbedtls::MbedTlsWrapper::ComputeSha256Hash` /  `Hmac256`,
+  add a small in-process bounded asset cache on the proxy path,
+  migrate cpp-httplib namespace from `duckdb_httplib_openssl::` back
+  to plain `duckdb_httplib::`, and drop flock's direct
+  `find_package(OpenSSL)` + `target_link_libraries(... OpenSSL::SSL
+  OpenSSL::Crypto)`. The flock binary stops linking libssl/libcrypto
+  directly (binary-size win on the order of 200 KB – 1 MB per platform);
+  vcpkg.json's `[openssl, curl]` entries STAY because the bundled
+  httpfs sibling extension still needs both at build time. Not in v0.1
+  because the migration touches crypto + proxy + server namespace +
+  CMake and would churn `/sql` + admin handlers if interleaved with
+  PR-5/PR-6. Slotted as a dedicated post-PR-7 PR.
 - **`flockd` wrapper binary** — a tiny C++ binary that hides the
   `duckdb -no-stdin -init …` invocation behind `flockd /data/db.duckdb`.
   Not shipped in v0.1: the unwrapped command is short, an init script is
