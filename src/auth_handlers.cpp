@@ -3,6 +3,7 @@
 #include "flock_auth.hpp"
 #include "flock_crypto.hpp"
 #include "flock_http_server.hpp"
+#include "flock_session.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -161,8 +162,8 @@ void ApplyCorsHeaders(AuthManager &auth, const duckdb_httplib_openssl::Request &
 
 } // namespace
 
-AuthHandlers::AuthHandlers(FlockHttpServer &server_p, AuthManager &auth_p)
-    : server(server_p), auth(auth_p) {
+AuthHandlers::AuthHandlers(FlockHttpServer &server_p, AuthManager &auth_p, SessionManager &sessions_p)
+    : server(server_p), auth(auth_p), sessions(sessions_p) {
 }
 
 AuthHandlers::~AuthHandlers() {
@@ -314,14 +315,28 @@ void AuthHandlers::HandleLogout(const duckdb_httplib_openssl::Request &req,
 	}
 	res.set_header("Set-Cookie", cookie.str());
 
-	// PR-4 logs-but-ignores ?destroy_sessions=true. Per SPEC §6 line
-	// 668 this should destroy all DB sessions owned by the principal,
-	// but SessionManager isn't principal-aware until PR-5 (when /sql
-	// lands and the (principal, ui_conn) -> session_id map exists).
-	// We accept the query param to avoid breaking forward-compat
-	// clients; the actual destroy lands in PR-5.
+	// PR-5: ?destroy_sessions=true destroys all DB sessions owned by
+	// the authenticated principal (per SPEC §6 logout table). We
+	// authenticate first to learn the principal_id; if the caller is
+	// unauthenticated (no valid cookie/bearer) we silently skip the
+	// destroy (and still return 200 to avoid leaking auth state).
+	auto destroy_param = req.get_param_value("destroy_sessions");
+	idx_t destroyed = 0;
+	if (StringUtil::Lower(destroy_param) == "true" || destroy_param == "1") {
+		auto authn = auth.AuthenticateRequest(req, AuthHandlers::kLoginSessionId);
+		if (authn.ok && !authn.principal_id.empty()) {
+			destroyed = sessions.DestroyAllOwnedBy(authn.principal_id);
+		}
+	}
+
 	res.status = 200;
-	res.set_content("{\"ok\":true}", "application/json");
+	if (destroyed > 0) {
+		auto body = StringUtil::Format("{\"ok\":true,\"destroyedSessions\":%llu}",
+		                               static_cast<unsigned long long>(destroyed));
+		res.set_content(body, "application/json");
+	} else {
+		res.set_content("{\"ok\":true}", "application/json");
+	}
 }
 
 void AuthHandlers::HandlePreflight(const duckdb_httplib_openssl::Request &req,
@@ -339,7 +354,7 @@ void AuthHandlers::HandlePreflight(const duckdb_httplib_openssl::Request &req,
 		if (decision.allowed) {
 			res.set_header("Access-Control-Allow-Origin", decision.origin);
 			res.set_header("Access-Control-Allow-Credentials", "true");
-			res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+			res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
 			res.set_header("Access-Control-Allow-Headers", kAllowedCorsHeaders);
 			res.set_header("Access-Control-Max-Age", "600");
 			res.set_header("Vary", "Origin");
@@ -393,6 +408,26 @@ void AuthHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// CORS preflight when an allow-list is configured.
 	http.Options("/quack", [self](const duckdb_httplib_openssl::Request &req,
 	                               duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
+
+	// /sql OPTIONS preflight — same pattern. The actual POST handler
+	// lives in SqlHandlers (PR-5). SPEC §7 lists /sql in the preflight
+	// route table.
+	http.Options("/sql", [self](const duckdb_httplib_openssl::Request &req,
+	                             duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
+
+	// Explicit SQL-session routes need their own browser preflight
+	// coverage; CORS preflight is per-path, so OPTIONS /sql does not
+	// cover /sql/sessions/new or /sql/sessions/<id>.
+	http.Options("/sql/sessions/new", [self](const duckdb_httplib_openssl::Request &req,
+	                                          duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
+	http.Options(R"(^/sql/sessions/([^/]+)$)", [self](const duckdb_httplib_openssl::Request &req,
+	                                                   duckdb_httplib_openssl::Response &res) {
 		self->HandlePreflight(req, res);
 	});
 }

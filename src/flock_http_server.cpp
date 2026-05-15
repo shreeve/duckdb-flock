@@ -5,6 +5,7 @@
 #include "flock_auth.hpp"
 #include "flock_session.hpp"
 #include "quack_server.hpp"  // QuackHandlers
+#include "sql_handlers.hpp"
 #include "ui_handlers.hpp"   // ui::UiHandlers
 
 #include "duckdb/common/exception.hpp"
@@ -164,11 +165,20 @@ void FlockHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	admin_handlers->Register(*server);
 
 	// AuthHandlers: POST /auth/login, POST /auth/logout, OPTIONS /auth/*,
-	// OPTIONS /quack. Registered AFTER QuackHandlers so OPTIONS /quack
-	// is owned by the allow-list-aware handler (QuackHandlers no longer
-	// registers an OPTIONS handler at all in PR-4).
-	auth_handlers = make_uniq<AuthHandlers>(*this, *auth);
+	// OPTIONS /quack, OPTIONS /sql. Registered AFTER QuackHandlers so
+	// OPTIONS /quack is owned by the allow-list-aware handler (QuackHandlers
+	// no longer registers an OPTIONS handler at all in PR-4).
+	// PR-5: also takes SessionManager so /auth/logout?destroy_sessions=true
+	// can destroy the authenticated principal's owned sessions.
+	auth_handlers = make_uniq<AuthHandlers>(*this, *auth, *sessions);
 	auth_handlers->Register(*server);
+
+	// SqlHandlers: POST /sql, POST /sql/sessions/new, DELETE /sql/sessions/:id.
+	// Registered AFTER AuthHandlers (so /sql/sessions doesn't compete
+	// with /auth/login for OPTIONS preflight ownership) and BEFORE
+	// UiHandlers (so its catch-all doesn't shadow /sql).
+	sql_handlers = make_uniq<SqlHandlers>(*this, *auth, *sessions, db);
+	sql_handlers->Register(*server);
 
 	// UiHandlers: /localEvents (SSE), /localToken, /ddb/interrupt,
 	// /ddb/run, /ddb/tokenize, GET /.* (catch-all proxy to ui.duckdb.org).
@@ -293,6 +303,7 @@ void FlockHttpServer::Close() {
 	// what they reference. We've drained to zero above, so no in-flight
 	// callback should be touching them.
 	ui_handlers.reset();
+	sql_handlers.reset();
 	auth_handlers.reset();
 	admin_handlers.reset();
 	quack_handlers.reset();

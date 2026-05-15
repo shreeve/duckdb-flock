@@ -34,6 +34,7 @@ namespace duckdb {
 
 class FlockHttpServer;
 class AuthManager;
+class SessionManager;
 
 class AuthHandlers {
 public:
@@ -50,7 +51,7 @@ public:
 	// flock_auth_cookie_ttl_s setting if configured.
 	static constexpr uint64_t kDefaultCookieTtlSec = 43200;
 
-	AuthHandlers(FlockHttpServer &server, AuthManager &auth);
+	AuthHandlers(FlockHttpServer &server, AuthManager &auth, SessionManager &sessions);
 	~AuthHandlers();
 
 	AuthHandlers(const AuthHandlers &) = delete;
@@ -81,6 +82,7 @@ private:
 
 	FlockHttpServer &server;
 	AuthManager &auth;
+	SessionManager &sessions;
 };
 
 } // namespace duckdb

@@ -217,3 +217,26 @@ must use http or https scheme
 # Reset for any later tests in the file.
 statement ok
 RESET GLOBAL flock_cors_origins
+
+# ------------------------------------------------------------------
+# PR-5: /sql settings — SQL-testable surface
+# ------------------------------------------------------------------
+# The HTTP-level /sql behavior (NDJSON streaming, one-shot JSON,
+# sessions, params, auth gates, type round-trips) lives in
+# scripts/golden-sql-roundtrip.sh. The block below covers settings
+# registration/defaults.
+
+query I
+SELECT current_setting('flock_max_sessions')
+----
+1024
+
+query I
+SELECT current_setting('flock_max_response_rows')
+----
+0
+
+query I
+SELECT current_setting('flock_max_request_body_bytes')
+----
+268435456
