@@ -21,7 +21,8 @@ add_library(
   sql_json_writer.cpp
   sql_chunk_encoder.cpp
   sql_param_decoder.cpp
-  sql_handlers.cpp)
+  sql_handlers.cpp
+  harbor_query_timeout.cpp)
 
 # PR-3: vendored duckdb-ui sources, refactored into UiHandlers.
 # - http_server.cpp deleted (replaced by ui_handlers.cpp)

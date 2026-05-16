@@ -184,6 +184,13 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 		}
 	}
 
+	// PR-7b — start the per-process timeout sweeper before any handler
+	// lambdas can register and start serving. The sweeper's lifetime
+	// is bounded by SessionManager (started here, joined in its
+	// destructor). Idempotent: if the sweeper is already running
+	// (e.g. from a quick stop+start), the call is a no-op.
+	sessions->StartTimeoutSweeper();
+
 	// Order matters: cpp-httplib resolves routes in registration order.
 	// UiHandlers' GET /.* catch-all MUST be registered LAST or it shadows
 	// /quack, /health, /info, etc.

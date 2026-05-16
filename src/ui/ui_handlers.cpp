@@ -37,6 +37,7 @@
 #include "harbor_auth.hpp"
 #include "harbor_crypto.hpp"
 #include "harbor_http_server.hpp"
+#include "harbor_query_timeout.hpp"
 
 #include "duckdb/main/config.hpp"
 
@@ -601,6 +602,14 @@ void UiHandlers::DoHandleRun(const httplib::Request &req, httplib::Response &res
 	}
 
 	auto connection = UIStorageExtensionInfo::GetState(*db).FindOrCreateConnection(*db, connection_name);
+	// PR-7b — wrap the UI-pool connection in a query-timeout watchdog
+	// for the lifetime of this /ddb/run handler. UI connections are
+	// in their own per-principal pool (UIStorageExtensionInfo) and
+	// not visible to SessionManager's sweeper, so the per-request
+	// RAII watchdog is the right enforcement vehicle. `timeout=0`
+	// (the default) yields a no-op watchdog (no thread spawned).
+	auto ui_query_timeout = ReadQueryTimeoutSeconds(*db);
+	QueryTimeoutWatchdog ui_watchdog(*connection, ui_query_timeout);
 	auto &context = *connection->context;
 	if (!errors_as_json_string.empty()) {
 #if DUCKDB_VERSION_AT_LEAST(1, 5, 0)

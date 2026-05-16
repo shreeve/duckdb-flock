@@ -38,6 +38,7 @@
 
 #include "harbor_auth.hpp"
 #include "harbor_http_server.hpp"
+#include "harbor_query_timeout.hpp"
 #include "harbor_session.hpp"
 
 #include "quack_log.hpp"
@@ -78,18 +79,13 @@ bool MessageRequiresConnection(MessageType type) {
 	}
 }
 
-// PR-6 — RAII helper that pairs query_in_flight set-true with a
-// guaranteed set-false when the case body exits (success, exception,
-// or early return-make_uniq<ErrorResponse>(...)). Caller must already
-// hold session->lock; last_query is mutated under that lock.
-struct QuackInFlightGuard {
-	HarborSession *session = nullptr;
-	~QuackInFlightGuard() {
-		if (session) {
-			session->query_in_flight.store(false, std::memory_order_release);
-		}
-	}
-};
+// (PR-6's QuackInFlightGuard struct was removed in PR-7b in favor of
+// the unified QueryExecutionGuard from harbor_query_timeout.hpp, which
+// handles both the in-flight bookkeeping AND the per-session deadline
+// + generation counter the timeout sweeper needs to enforce
+// `harbor_query_timeout_s`. The functional contract for the case
+// bodies below is unchanged: caller holds session->lock for the
+// guard's lifetime.)
 
 string ExtractQuery(QuackMessage &msg) {
 	if (msg.Type() == MessageType::PREPARE_REQUEST) {
@@ -206,11 +202,13 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 		std::unique_lock<std::mutex> lock(s.lock);
 		s.duckdb_query_result.reset();
 
-		// PR-6 — record last_query + flip query_in_flight=true for /sessions
-		// visibility. Reset on case-body exit via QuackInFlightGuard.
-		s.last_query = prepare_request_message.Query();
-		s.query_in_flight.store(true, std::memory_order_release);
-		QuackInFlightGuard prepare_in_flight {&s};
+		// PR-7b — guarded query: sets last_query (under s.lock) +
+		// query_in_flight + deadline; sweeper interrupts if overdue;
+		// dtor clears state. Generation counter prevents a stale
+		// sweeper interrupt from hitting the next query on this
+		// session. Use the timeout setting at PREPARE time.
+		QueryExecutionGuard prepare_guard(s, prepare_request_message.Query(),
+		                                    ReadQueryTimeoutSeconds(db_inst));
 
 		{
 			auto query_result = s.duckdb_connection->SendQuery(prepare_request_message.Query());
@@ -248,12 +246,13 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 		auto &s = *session;
 		std::unique_lock<std::mutex> lock(s.lock);
 
-		// PR-6 — last_query is already set from the preceding PREPARE
-		// of this result_uuid. Flip in_flight while CreateBatch loops
-		// against the streamed result. RAII ensures it goes back to
-		// false on every return path.
-		s.query_in_flight.store(true, std::memory_order_release);
-		QuackInFlightGuard fetch_in_flight {&s};
+		// PR-7b — last_query was already set by the preceding PREPARE.
+		// We flip in_flight + arm a fresh deadline + bump generation
+		// for THIS fetch (so the sweeper sees the right window),
+		// passing the prior last_query through unchanged. Construct
+		// guard with `s.last_query` rather than the message body
+		// because FETCH carries no query string.
+		QueryExecutionGuard fetch_guard(s, s.last_query, ReadQueryTimeoutSeconds(db_inst));
 
 		if (s.result_uuid != fetch_request_message.uuid) {
 			return make_uniq<ErrorResponse>("Result has been closed");
@@ -297,13 +296,12 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 
 		std::unique_lock<std::mutex> lock(s.lock);
 
-		// PR-6 — instrumentation for /sessions visibility. Use the
-		// synthesized dummy_insert_query for last_query so admins see
-		// "INSERT INTO foo.bar VALUES (NULL)" rather than nothing — the
-		// actual append's row count isn't a single SQL string anyway.
-		s.last_query = dummy_insert_query;
-		s.query_in_flight.store(true, std::memory_order_release);
-		QuackInFlightGuard append_in_flight {&s};
+		// PR-7b — guard the append's lifetime. last_query is the
+		// synthesized dummy_insert_query so admins see
+		// "INSERT INTO foo.bar VALUES (NULL)" rather than nothing —
+		// the actual append's row count isn't a single SQL string
+		// anyway. Sweeper enforces harbor_query_timeout_s.
+		QueryExecutionGuard append_guard(s, dummy_insert_query, ReadQueryTimeoutSeconds(db_inst));
 
 		auto &context = *s.duckdb_connection->context;
 		auto table_info = context.TableInfo(append_request_message.SchemaName(), append_request_message.TableName());

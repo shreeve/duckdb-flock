@@ -26,6 +26,7 @@
 
 #include "harbor_auth.hpp"
 #include "harbor_http_server.hpp"
+#include "harbor_query_timeout.hpp"
 #include "harbor_session.hpp"
 #include "ui_handlers.hpp" // ui::UiHandlers::UiExtensionVersion (for /info)
 
@@ -474,10 +475,17 @@ void AdminHandlers::HandleTables(const duckdb_httplib_openssl::Request &req, duc
 	// to keep the output (database, schema, name, type) structured and stable.
 	// NULL schema => default 'main' filter is applied client-side via SQL.
 	Connection con(*db_locked);
+	// PR-7b — query-timeout watchdog on the transient catalog query.
+	auto timeout_seconds = ReadQueryTimeoutSeconds(*db_locked);
+	QueryTimeoutWatchdog watchdog(con, timeout_seconds);
 	auto qr = con.Query(
 	    "SELECT database_name, schema_name, table_name, internal "
 	    "FROM duckdb_tables() ORDER BY database_name, schema_name, table_name");
 	if (!qr || qr->HasError()) {
+		if (watchdog.TimedOut()) {
+			RespondError(res, 504, "QUERY_TIMEOUT", "/tables exceeded harbor_query_timeout_s");
+			return;
+		}
 		RespondError(res, 500, "INTERNAL", qr ? qr->GetError() : "duckdb_tables() failed");
 		return;
 	}
@@ -552,12 +560,19 @@ void AdminHandlers::HandleSchema(const duckdb_httplib_openssl::Request &req, duc
 	// Default schema = 'main' (the v0.1 contract for this 2-segment path).
 	// A future PR can add /schema/:db/:schema/:table for non-default schemas.
 	Connection con(*db_locked);
+	// PR-7b — query-timeout watchdog on the transient catalog query.
+	auto timeout_seconds = ReadQueryTimeoutSeconds(*db_locked);
+	QueryTimeoutWatchdog watchdog(con, timeout_seconds);
 	auto prepared = con.Prepare(
 	    "SELECT column_name, data_type, is_nullable, column_default, column_index "
 	    "FROM duckdb_columns() "
 	    "WHERE database_name = $1 AND schema_name = 'main' AND table_name = $2 "
 	    "ORDER BY column_index");
 	if (!prepared || prepared->HasError()) {
+		if (watchdog.TimedOut()) {
+			RespondError(res, 504, "QUERY_TIMEOUT", "/schema exceeded harbor_query_timeout_s");
+			return;
+		}
 		RespondError(res, 500, "INTERNAL", prepared ? prepared->GetError() : "prepare duckdb_columns() failed");
 		return;
 	}
@@ -566,6 +581,10 @@ void AdminHandlers::HandleSchema(const duckdb_httplib_openssl::Request &req, duc
 	binds.emplace_back(Value(table_name));
 	auto qr = prepared->Execute(binds);
 	if (!qr || qr->HasError()) {
+		if (watchdog.TimedOut()) {
+			RespondError(res, 504, "QUERY_TIMEOUT", "/schema exceeded harbor_query_timeout_s");
+			return;
+		}
 		RespondError(res, 500, "INTERNAL", qr ? qr->GetError() : "duckdb_columns() execute failed");
 		return;
 	}
@@ -666,7 +685,13 @@ void AdminHandlers::HandleCheckpoint(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 	Connection con(*db_locked);
-	bool forced = false;
+	// PR-7b — wrap the transient connection in a timeout watchdog.
+	// `harbor_query_timeout_s == 0` (the default) makes this a no-op;
+	// non-zero values cause Connection::Interrupt() to fire after
+	// the deadline, surfacing as either a HasError() result or an
+	// exception that the catch path classifies as QUERY_TIMEOUT.
+	auto timeout_seconds = ReadQueryTimeoutSeconds(*db_locked);
+	QueryTimeoutWatchdog watchdog(con, timeout_seconds);
 	try {
 		// Plain CHECKPOINT first — fast, common case. If another write
 		// transaction is open it errors with "Cannot CHECKPOINT: there
@@ -679,6 +704,14 @@ void AdminHandlers::HandleCheckpoint(const duckdb_httplib_openssl::Request &req,
 		auto qr = con.Query("CHECKPOINT");
 		if (!qr || qr->HasError()) {
 			auto err = qr ? qr->GetError() : "CHECKPOINT failed";
+			// Timeout takes precedence over generic error
+			// classification — the interrupt fired by the watchdog
+			// is what produced the error.
+			if (watchdog.TimedOut()) {
+				RespondError(res, 504, "QUERY_TIMEOUT",
+				              "checkpoint exceeded harbor_query_timeout_s");
+				return;
+			}
 			// Map the well-known busy error to 409 CONFLICT so
 			// operator tooling can distinguish "transient try-again"
 			// from real DB failure.
@@ -691,6 +724,10 @@ void AdminHandlers::HandleCheckpoint(const duckdb_httplib_openssl::Request &req,
 			return;
 		}
 	} catch (const std::exception &ex) {
+		if (watchdog.TimedOut()) {
+			RespondError(res, 504, "QUERY_TIMEOUT", "checkpoint exceeded harbor_query_timeout_s");
+			return;
+		}
 		string err(ex.what());
 		if (err.find("other write transactions active") != string::npos ||
 		    err.find("Cannot CHECKPOINT") != string::npos) {
@@ -700,7 +737,6 @@ void AdminHandlers::HandleCheckpoint(const duckdb_httplib_openssl::Request &req,
 		RespondError(res, 500, "INTERNAL", err);
 		return;
 	}
-	(void)forced;
 
 	// Per round-18 review: be explicit that the v0.1 response does NOT
 	// include WAL state. v1.5.2 doesn't expose a stable WAL-size API
