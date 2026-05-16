@@ -254,3 +254,17 @@ query I
 SELECT current_setting('harbor_allow_admin_without_authz')
 ----
 false
+
+# ------------------------------------------------------------------
+# PR-7b: harbor_query_timeout_s — SQL-testable surface
+# ------------------------------------------------------------------
+# The HTTP-level timeout enforcement (sweeper, RAII watchdog, mid-stream
+# QUERY_TIMEOUT NDJSON line, HTTP 504 pre-response) lands with the
+# threading + wiring commit on this same branch. Today's foundation
+# commit just registers the setting with the SPEC §9 default (0 = no
+# limit).
+
+query I
+SELECT current_setting('harbor_query_timeout_s')
+----
+0

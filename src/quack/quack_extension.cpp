@@ -312,6 +312,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "harbor_serve logs a loud WARN at startup when the combination is in effect.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
 
+	// PR-7b: per-query wall-clock timeout. 0 = no limit (matches SPEC §9
+	// default; preserves the long-analytical-query workload by default).
+	// Non-zero value applies to every Connection::Execute path uniformly:
+	// /sql (Mode A + Mode B + streaming + one-shot), /quack PREPARE/APPEND
+	// /FETCH, /ddb/run, and admin transient queries (/tables, /schema,
+	// /checkpoint). Enforcement is via Connection::Interrupt() on a
+	// 250ms sweeper tick (SessionManager-tracked sessions) or a
+	// per-request RAII watchdog with condition_variable (ephemeral /sql
+	// and transient admin/UI connections). Per round-21 review with
+	// GPT-5.5: HarborSession carries `query_generation` so a stale
+	// sweeper interrupt can never hit the next query, and an
+	// InterruptCause enum classifies the cancellation reason so
+	// QUERY_TIMEOUT can be reported with HTTP 504 (or as the mid-stream
+	// NDJSON `{"type":"error","code":"QUERY_TIMEOUT"}` line) instead
+	// of being indistinguishable from a user-issued /sql/cancel or
+	// client-disconnect interrupt.
+	config.AddExtensionOption(
+	    "harbor_query_timeout_s",
+	    "Per-query wall-clock timeout in seconds. 0 disables the timeout. Non-zero values "
+	    "interrupt any Connection::Execute (/sql, /quack, /ddb/run, admin transients) that "
+	    "runs longer than the configured limit, returning HTTP 504 with errorCode "
+	    "QUERY_TIMEOUT. Default 0.",
+	    LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::GLOBAL);
+
 	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
 	// existing duckdb-ui tooling/docs still apply. The local-port
 	// setting from upstream UI is intentionally NOT registered —

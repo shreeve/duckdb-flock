@@ -38,6 +38,21 @@ class EncryptionState;
 // for the duration of a request to keep the session alive even if a
 // concurrent disconnect erases the map entry mid-request (a real race
 // the previous optional_ptr design would have hit).
+// PR-7b: classify why a session's in-flight query was cancelled, so
+// the catch-side error mapping can report QUERY_TIMEOUT (HTTP 504 or
+// mid-stream NDJSON line) distinctly from a user-issued /sql/cancel,
+// client-disconnect, or unsolicited DuckDB exception. Per round-21
+// review: DuckDB exception text is unreliable as the only signal.
+//
+// Stored as an `std::atomic<uint8_t>` rather than `std::atomic<enum>`
+// for portability (GCC/Clang/MSVC all guarantee lock-free atomic<u8>).
+enum class InterruptCause : uint8_t {
+	NONE = 0,         // no interrupt fired (or already cleared)
+	TIMEOUT = 1,      // sweeper or RAII watchdog hit harbor_query_timeout_s
+	USER_CANCEL = 2,  // POST /sql/cancel or POST /interrupt
+	DISCONNECT = 3,   // client closed connection mid-stream / quack DISCONNECT
+};
+
 struct HarborSession {
 	explicit HarborSession(string session_id_p);
 	HarborSession(string session_id_p, string owner_principal_id_p);
@@ -72,6 +87,44 @@ struct HarborSession {
 	const std::chrono::steady_clock::time_point created_at;
 	string last_query;                       // guarded by `lock`
 	std::atomic<bool> query_in_flight {false};
+
+	// PR-7b: query-timeout enforcement state. Per round-21 review
+	// (GPT-5.5), naive sweeper-based interrupts have a fatal race —
+	// a stale interrupt can hit the next query after the previous one
+	// completed and a new one started. Generation-versioned state
+	// closes that race:
+	//
+	// `query_generation`: monotonically incremented by the
+	//                     QueryExecutionGuard ctor each time a new
+	//                     query starts on this session. Read by the
+	//                     sweeper to identify which generation it's
+	//                     about to interrupt; written to
+	//                     `timed_out_generation` BEFORE calling
+	//                     Connection::Interrupt().
+	//
+	// `query_deadline_ms`: monotonic clock deadline (ms since
+	//                      steady_clock epoch); 0 means no timeout.
+	//                      Read by the sweeper.
+	//
+	// `timed_out_generation`: set by the sweeper to the generation
+	//                          it interrupted. Read by the
+	//                          QueryExecutionGuard destructor (and
+	//                          the catch path) to classify whether
+	//                          THIS query was the one timed out;
+	//                          if `timed_out_generation == my_generation`,
+	//                          the interrupt was a TIMEOUT, otherwise
+	//                          some other cause won the race.
+	//
+	// `interrupt_cause`: optional separate signal for USER_CANCEL /
+	//                    DISCONNECT, set by their respective callers
+	//                    just before calling Interrupt(). The catch
+	//                    path reads this to map to the right
+	//                    errorCode. NONE = no cause set; cleared by
+	//                    QueryExecutionGuard at completion.
+	std::atomic<uint64_t> query_generation {0};
+	std::atomic<int64_t> query_deadline_ms {0};
+	std::atomic<uint64_t> timed_out_generation {0};
+	std::atomic<uint8_t> interrupt_cause {static_cast<uint8_t>(InterruptCause::NONE)};
 };
 
 // PR-6 — value snapshot of a HarborSession's instrumentation fields,
