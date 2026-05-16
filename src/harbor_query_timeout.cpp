@@ -161,7 +161,11 @@ QueryTimeoutWatchdog::QueryTimeoutWatchdog(Connection &connection_p, uint64_t ti
 	active = true;
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int64_t>(timeout_seconds));
 	thread = std::thread([this, deadline] {
-		std::unique_lock<std::mutex> lk(mutex);
+		// Brace-init avoids the most-vexing-parse MSVC hits when a
+		// member named `mutex` is in scope; the member rename to
+		// `mu_` makes the parens form work too, but the brace-init
+		// is the more-defensive idiom and we keep it for clarity.
+		std::unique_lock<std::mutex> lk{mu_};
 		// wait_until's predicate form contract: returns true iff the
 		// predicate is true at exit. If the destructor signalled
 		// `done` (either before our wait or by notifying the cv),
@@ -194,7 +198,7 @@ QueryTimeoutWatchdog::~QueryTimeoutWatchdog() {
 		return;
 	}
 	{
-		std::lock_guard<std::mutex> lk(mutex);
+		std::lock_guard<std::mutex> lk{mu_};
 		done = true;
 	}
 	cv.notify_one();

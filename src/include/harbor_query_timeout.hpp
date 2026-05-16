@@ -151,7 +151,15 @@ public:
 private:
 	Connection &connection;
 	std::thread thread;
-	std::mutex mutex;
+	// PR-7b round-22 follow-up: renamed from `mutex` to `mu_` to
+	// avoid a most-vexing-parse on MSVC. With a member named `mutex`,
+	// the lambda body's `std::unique_lock<std::mutex> lk(mutex);` was
+	// parsed by MSVC as a function declaration (lk returning
+	// unique_lock, taking a std::mutex parameter) instead of a
+	// variable declaration. The Windows CI build failed at compile
+	// time on the post-PR-7a 9-platform matrix (caught the issue
+	// BEFORE PR-7b shipped, exactly the PR-7a value-prop).
+	std::mutex mu_;
 	std::condition_variable cv;
 	bool done = false;
 	std::atomic<bool> timed_out {false};
