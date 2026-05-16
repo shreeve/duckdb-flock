@@ -117,6 +117,14 @@ bool IsBuiltinNopAuthz(const string &fn_name) {
 		}
 		normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
 	}
+	// Round-20 polish: strip a leading schema-qualifier prefix
+	// (`main.`, `temp.`, etc.) so `main.harbor_nop_authorization`
+	// is recognized as a built-in nop rather than slipping through
+	// as "custom" and reopening the round-19 fail-open.
+	auto dot = normalized.rfind('.');
+	if (dot != string::npos) {
+		normalized = normalized.substr(dot + 1);
+	}
 	return normalized == "harbor_nop_authorization" || normalized == "quack_nop_authorization";
 }
 
@@ -235,10 +243,6 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 		return false;
 	}
 
-	// Resolve the authz function name in Harbor-primary / Quack-compat order.
-	auto harbor_fn = GetSettingString(*db_locked, "harbor_authorization_function");
-	auto quack_fn = GetSettingString(*db_locked, "quack_authorization_function");
-
 	// PR-6 — centralized default-deny on __HARBOR_ADMIN__:* synthetic
 	// admin strings when no custom hook is configured. Per SPEC §7:
 	// "Admin authorization is default-deny when no hook is configured."
@@ -255,17 +259,21 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	//     `quack_authorization_function='quack_nop_authorization'`
 	//     and inadvertently expose admin.
 	//
-	// Combined rule: a setting is "custom-configured" iff it is
-	// non-empty AND not one of the known built-in nops. Any operator
-	// who aliases the nop under a custom name is making an explicit
-	// policy choice; their alias is treated as their custom policy.
+	// Combined rule (encoded in IsAdminAuthzCustomConfigured): a
+	// setting is "custom-configured" iff it is non-empty AND its
+	// (lower-cased, whitespace-stripped, schema-prefix-stripped)
+	// value is not a known built-in nop. Aliases under custom names
+	// are treated as the operator's custom policy.
 	//
 	// Operators who genuinely want unrestricted admin access on a
 	// trusted-network deployment flip harbor_allow_admin_without_authz=true.
 	// harbor_serve emits a loud WARN log when the combination is in effect.
-	const bool custom_authz_configured = AuthManager::IsAdminAuthzCustomConfigured(*db_locked);
-	const bool is_admin_query = StringUtil::StartsWith(query, "__HARBOR_ADMIN__:");
-	if (is_admin_query && !custom_authz_configured) {
+	//
+	// Round-20 polish: only pay the two-setting-read cost when the
+	// query is actually __HARBOR_ADMIN__-prefixed. Non-admin /sql and
+	// /quack queries hit the fast resolve-fn path below directly.
+	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") &&
+	    !AuthManager::IsAdminAuthzCustomConfigured(*db_locked)) {
 		bool allow_admin_without_authz = false;
 		Value allow_setting;
 		auto &config = DBConfig::GetConfig(*db_locked);
@@ -280,9 +288,10 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 		// returns true. This is the explicit operator opt-in path.
 	}
 
-	auto fn_name = harbor_fn;
+	// Resolve the authz function name in Harbor-primary / Quack-compat order.
+	auto fn_name = GetSettingString(*db_locked, "harbor_authorization_function");
 	if (fn_name.empty()) {
-		fn_name = quack_fn;
+		fn_name = GetSettingString(*db_locked, "quack_authorization_function");
 	}
 	if (fn_name.empty()) {
 		fn_name = "harbor_nop_authorization";

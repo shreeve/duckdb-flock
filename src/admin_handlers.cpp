@@ -222,20 +222,23 @@ bool HasAllowedBrowserOriginIfCookie(AuthManager &auth, const duckdb_httplib_ope
 	return decision.allowed;
 }
 
-// Content-Type check for JSON-body POSTs. PR-6 follow-up (round 19):
+// Content-Type check for JSON-body POSTs. PR-6 follow-up (round 19/20):
 // the prior `lower.find("application/json") == 0` accepted things like
-// `application/jsonjunk` or `application/json-malicious`. Tighten to
-// require either an exact match OR the `;` parameter delimiter (so
+// `application/jsonjunk`. Round 20: only `;` is the standard MIME
+// parameter separator — the trailing-space variant is non-standard.
+// Strip leading AND trailing whitespace from the header value, then
+// require exact match OR the `;` parameter delimiter (so
 // `application/json; charset=utf-8` continues to work).
 bool HasJsonContentType(const duckdb_httplib_openssl::Request &req) {
 	auto ct = req.get_header_value("Content-Type");
 	auto lower = StringUtil::Lower(ct);
-	// Strip any leading whitespace from operator-side weird headers.
 	while (!lower.empty() && std::isspace(static_cast<unsigned char>(lower.front()))) {
 		lower.erase(lower.begin());
 	}
-	return lower == "application/json" || StringUtil::StartsWith(lower, "application/json;") ||
-	       StringUtil::StartsWith(lower, "application/json ");
+	while (!lower.empty() && std::isspace(static_cast<unsigned char>(lower.back()))) {
+		lower.pop_back();
+	}
+	return lower == "application/json" || StringUtil::StartsWith(lower, "application/json;");
 }
 
 // Find the value of "sessionId" in a small JSON body. Minimal — same

@@ -463,4 +463,27 @@ code="$(curl -s -o /dev/null -w '%{http_code}' \
     fail "explicit case-mixed nop authz: /whoami expected 403 (got ${code})"
 pass "explicit nop-authz fn case-insensitive — Harbor_NOP_Authorization still triggers admin default-deny"
 
+# Round-20 polish: schema-qualified nop fn name must also be recognized.
+# Without IsBuiltinNopAuthz's rfind('.')+substr step, `main.harbor_nop_authorization`
+# would slip through and re-open the round-19 fail-open.
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+PORT6="$((PORT + 5))"
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+SET GLOBAL harbor_authorization_function='main.harbor_nop_authorization';
+CALL harbor_serve('quack:127.0.0.1:${PORT6}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT6}/info" || fail "phase-6 server did not start"
+code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT6}/whoami")"
+[[ "${code}" == "403" ]] || \
+    fail "schema-qualified nop authz: /whoami expected 403 (got ${code}) — round-20 schema-strip regression"
+pass "schema-qualified nop-authz fn (main.harbor_nop_authorization) still triggers admin default-deny"
+
 green "All admin-roundtrip golden assertions passed."
