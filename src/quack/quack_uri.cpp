@@ -8,15 +8,22 @@ QuackUri::QuackUri(string uri_p, bool ssl_p) : ssl(ssl_p), uri(uri_p) {
 	ipv6 = false;
 	port = 9494;
 	StringUtil::Trim(uri);
-	// first off, lets be tolerant and accept this variant, too
+	// first off, lets be tolerant and accept these variants, too
 	if (StringUtil::StartsWith(uri, "quack://")) {
 		uri = StringUtil::Replace(uri, "quack://", "quack:");
 	}
-	if (!StringUtil::StartsWith(uri, "quack:")) {
-		throw InvalidInputException("Invalid DuckDB Quack RPC URI, needs to start with 'quack:'");
+	if (StringUtil::StartsWith(uri, "harbor://")) {
+		uri = StringUtil::Replace(uri, "harbor://", "harbor:");
 	}
 
-	auto remainder = StringUtil::Replace(uri, "quack:", "");
+	string remainder;
+	if (StringUtil::StartsWith(uri, "quack:")) {
+		remainder = StringUtil::Replace(uri, "quack:", "");
+	} else if (StringUtil::StartsWith(uri, "harbor:")) {
+		remainder = StringUtil::Replace(uri, "harbor:", "");
+	} else {
+		throw InvalidInputException("Invalid DuckDB Harbor/Quack RPC URI, needs to start with 'harbor:' or 'quack:'");
+	}
 	if (remainder.empty()) {
 		throw InvalidInputException("Missing hostname");
 	}
@@ -77,6 +84,16 @@ static void QuackUriParser(const DataChunk &args, ExpressionState &, Vector &res
 // just for testing
 ScalarFunction QuackParseUriFunction::GetFunction() {
 	return ScalarFunction("quack_uri_parser", {/* uri */ LogicalType::VARCHAR, /* ssl */ LogicalType::BOOLEAN},
+	                      LogicalType::STRUCT({{"host", LogicalType::VARCHAR},
+	                                           {"port", LogicalType::USMALLINT},
+	                                           {"ipv6", LogicalType::BOOLEAN},
+	                                           {"ssl", LogicalType::BOOLEAN},
+	                                           {"url", LogicalType::VARCHAR}}),
+	                      QuackUriParser);
+}
+
+ScalarFunction QuackParseUriFunction::GetHarborFunction() {
+	return ScalarFunction("harbor_uri_parser", {/* uri */ LogicalType::VARCHAR, /* ssl */ LogicalType::BOOLEAN},
 	                      LogicalType::STRUCT({{"host", LogicalType::VARCHAR},
 	                                           {"port", LogicalType::USMALLINT},
 	                                           {"ipv6", LogicalType::BOOLEAN},

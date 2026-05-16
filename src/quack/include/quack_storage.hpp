@@ -4,9 +4,9 @@
 //
 // Upstream's QuackStorageExtensionInfo carried the multi-server map
 // (`unordered_map<string, unique_ptr<QuackServer>>`) plus the
-// CreateServer / StopServer / ListServers methods. flock is
+// CreateServer / StopServer / ListServers methods. harbor is
 // single-server-per-process per SPEC §2 — that state lives in
-// FlockServerState::Global() (in src/include/flock_http_server.hpp).
+// HarborServerState::Global() (in src/include/harbor_http_server.hpp).
 //
 // What stays here:
 //   - QuackStorageExtension: the StorageExtension subclass that wires
@@ -29,8 +29,9 @@ public:
 class QuackStorageExtensionInfo : public StorageExtensionInfo {
 public:
 	static constexpr const char *STORAGE_EXTENSION_KEY = "quack";
+	static constexpr const char *HARBOR_STORAGE_EXTENSION_KEY = "harbor";
 	// PR-2: the upstream multi-server CreateServer / StopServer / ListServers
-	// API is gone. Use FlockServerState::Global().Start() / .Stop() /
+	// API is gone. Use HarborServerState::Global().Start() / .Stop() /
 	// .WithCurrent() / .IsRunning() instead. See SPEC §2 single-server-
 	// per-process.
 };

@@ -2,23 +2,23 @@
 
 // Lifecycle SQL functions per SPEC §9:
 //
-//   flock_serve(uri, token := NULL, allow_other_hostname := false)
+//   harbor_serve(uri, token := NULL, allow_other_hostname := false)
 //     → row of (listen_uri, listen_url, auth_token)
-//   flock_stop(uri) → row of (status)  -- BOOLEAN-shaped per SPEC; we
+//   harbor_stop(uri) → row of (status)  -- BOOLEAN-shaped per SPEC; we
 //                                         actually return a status string
 //                                         to match upstream quack_stop
 //                                         output for compatibility
-//   flock_wait() → row of (BOOLEAN ok) -- blocks until clean shutdown
+//   harbor_wait() → row of (BOOLEAN ok) -- blocks until clean shutdown
 //                                         or signal; throws if no server
 //
 // All three are TABLE FUNCTIONS (not scalars) because they return rows
-// with named columns. Single-server-per-process: flock_serve throws if
+// with named columns. Single-server-per-process: harbor_serve throws if
 // a server is already running.
 //
 // quack_serve / quack_stop are kept as thin shims in quack_start_stop.cpp;
-// they delegate to FlockServerState::Global() under the hood.
+// they delegate to HarborServerState::Global() under the hood.
 //
-// quack_wait does not exist upstream — flock_wait is new in flock; it
+// quack_wait does not exist upstream — harbor_wait is new in harbor; it
 // arrived in PR-2 specifically to support the `duckdb -no-stdin -init …`
 // daemon-mode pattern (per SPEC §2 "Daemon mode"). There is no
 // `quack_wait` alias.
@@ -27,17 +27,17 @@
 
 namespace duckdb {
 
-class FlockServeFunction {
+class HarborServeFunction {
 public:
 	static TableFunctionSet GetFunction();
 };
 
-class FlockStopFunction {
+class HarborStopFunction {
 public:
 	static TableFunction GetFunction();
 };
 
-class FlockWaitFunction {
+class HarborWaitFunction {
 public:
 	static TableFunction GetFunction();
 };

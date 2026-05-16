@@ -1,7 +1,7 @@
 # Upstream `duckdb-ui` patches
 
-flock vendors `duckdb-ui`'s `src/` tree at branch `main` (commit
-`3339df3`, fetched 2026-05). This document tracks every edit flock
+harbor vendors `duckdb-ui`'s `src/` tree at branch `main` (commit
+`3339df3`, fetched 2026-05). This document tracks every edit harbor
 makes to vendored upstream files. Mirrors the `upstream-quack-patches.md`
 pattern.
 
@@ -11,7 +11,7 @@ pattern.
 
 | # | What | Why | Conflict risk on rebase |
 |---|---|---|---|
-| 1 | Replace `#error` directives with fallback `#define` defaults for `UI_EXTENSION_SEQ_NUM` (`"0"`) and `UI_EXTENSION_GIT_SHA` (`"embedded-in-flock"`) | Upstream's CMakeLists.txt computes these from `git rev-list --count HEAD` and `git rev-parse --short=10 HEAD`. flock doesn't have a separate UI extension build cycle, so we provide reasonable fallbacks. To override, pass `-DUI_EXTENSION_SEQ_NUM=N -DUI_EXTENSION_GIT_SHA=...` via `EXT_FLAGS` in the Makefile. | Low — this is a tiny header that rarely changes upstream. |
+| 1 | Replace `#error` directives with fallback `#define` defaults for `UI_EXTENSION_SEQ_NUM` (`"0"`) and `UI_EXTENSION_GIT_SHA` (`"embedded-in-harbor"`) | Upstream's CMakeLists.txt computes these from `git rev-list --count HEAD` and `git rev-parse --short=10 HEAD`. harbor doesn't have a separate UI extension build cycle, so we provide reasonable fallbacks. To override, pass `-DUI_EXTENSION_SEQ_NUM=N -DUI_EXTENSION_GIT_SHA=...` via `EXT_FLAGS` in the Makefile. | Low — this is a tiny header that rarely changes upstream. |
 
 ## Edits to `src/ui/include/watcher.hpp` and `src/ui/watcher.cpp`
 
@@ -23,14 +23,14 @@ pattern.
 
 | File | Why |
 |---|---|
-| `src/ui/http_server.cpp` (737 LOC upstream) | Refactored into `src/ui/ui_handlers.cpp`. Upstream's `HttpServer` was a singleton owning its own `duckdb_httplib_openssl::Server` + listener thread + atexit + Run() lifecycle. flock's architecture (per SPEC §2 + PR-2) puts the single httplib::Server on FlockHttpServer; UiHandlers is a stateless route registrar that registers against the shared server. The handler bodies (HandleGetLocalToken, HandleInterrupt, HandleRun, DoHandleRun, HandleTokenize, HandleGet → HandleProxyGet) are preserved nearly verbatim in `ui_handlers.cpp`. |
+| `src/ui/http_server.cpp` (737 LOC upstream) | Refactored into `src/ui/ui_handlers.cpp`. Upstream's `HttpServer` was a singleton owning its own `duckdb_httplib_openssl::Server` + listener thread + atexit + Run() lifecycle. harbor's architecture (per SPEC §2 + PR-2) puts the single httplib::Server on HarborHttpServer; UiHandlers is a stateless route registrar that registers against the shared server. The handler bodies (HandleGetLocalToken, HandleInterrupt, HandleRun, DoHandleRun, HandleTokenize, HandleGet → HandleProxyGet) are preserved nearly verbatim in `ui_handlers.cpp`. |
 | `src/ui/include/http_server.hpp` | Replaced by `src/ui/include/ui_handlers.hpp` (declares the new UiHandlers class). |
 
 ## Files EXCLUDED from the build (still on disk for reference)
 
 | File | Why |
 |---|---|
-| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with flock's `DUCKDB_CPP_EXTENSION_ENTRY(flock, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. |
+| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with harbor's `DUCKDB_CPP_EXTENSION_ENTRY(harbor, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. |
 
 ## Other vendored files — NO edits
 
@@ -58,7 +58,7 @@ diff -ru misc/duckdb-ui/src/ src/ui/
 #    - Apply to src/ui/ if applicable (most upstream changes will be
 #      drop-in: copy the new file content over).
 #    - For changes inside http_server.cpp specifically: there is no
-#      flock counterpart of that file anymore — instead, port the
+#      harbor counterpart of that file anymore — instead, port the
 #      diff into src/ui/ui_handlers.cpp manually. Most route handler
 #      bodies should diff cleanly because we preserved them verbatim.
 #    - For changes inside watcher.cpp: re-apply edit #2 above.
@@ -73,9 +73,9 @@ make release && make test_release
 #    /info returns X-DuckDB-UI-Extension-Version (the official UI
 #    bundled at ui.duckdb.org checks for this header):
 ./build/release/duckdb -unsigned -no-stdin -c "
-  LOAD '$PWD/build/release/extension/flock/flock.duckdb_extension';
+  LOAD '$PWD/build/release/extension/harbor/harbor.duckdb_extension';
   CALL quack_serve('quack:localhost:19495', token='smoke');
-  CALL flock_wait();
+  CALL harbor_wait();
 " &
 sleep 2 && curl -sf -i http://localhost:19495/info | grep X-DuckDB-UI
 
@@ -88,18 +88,18 @@ sleep 2 && curl -sf -i http://localhost:19495/info | grep X-DuckDB-UI
 
 ## Forward-looking notes
 
-- **PR-4** will introduce flock-specific cookie auth (HMAC-signed
-  `flock_session` cookie, `POST /auth/login`, flock login wrapper at
+- **PR-4** will introduce harbor-specific cookie auth (HMAC-signed
+  `harbor_session` cookie, `POST /auth/login`, harbor login wrapper at
   `GET /`). At that point `UiHandlers::HandleInterrupt`,
   `HandleRun`, `HandleTokenize`, `HandleGetLocalToken` will get a
   cookie-aware auth path that supplements (or replaces) the current
   Origin-set check. The Origin check itself will become more
-  restrictive (only configured `flock_cors_origins`).
+  restrictive (only configured `harbor_cors_origins`).
 - The PR-3 `HandleProxyGet` (was `HandleGet` upstream) does runtime
   HTTPS proxying to `ui.duckdb.org`. SPEC §8 lists `bundled` mode as
   a future option (post-v0.1) for air-gapped deployments. When
   bundled mode lands, `HandleProxyGet` becomes one of two
-  implementations selected at request time by the `flock_ui_assets`
+  implementations selected at request time by the `harbor_ui_assets`
   setting.
 - If the vendored-edit list grows beyond ~10 entries, that's a
   signal that the architectural integration isn't actually moving us

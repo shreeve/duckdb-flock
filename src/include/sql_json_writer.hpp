@@ -34,7 +34,7 @@
 #include <string>
 
 namespace duckdb {
-namespace flock_sql {
+namespace harbor_sql {
 
 class JsonWriter {
 public:
@@ -146,5 +146,5 @@ private:
 	bool first_in_frame = true;
 };
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

@@ -38,7 +38,7 @@ This software is a derivative work of:
     duckdb-ui's source.
 
 Files substantially derived from those projects retain their original
-upstream MIT headers in addition to flock's. The top-level LICENSE
+upstream MIT headers in addition to harbor's. The top-level LICENSE
 file does not substitute for per-file headers on derivative source.
 
 If additional third-party assets or dependencies are vendored into

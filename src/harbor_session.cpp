@@ -1,4 +1,4 @@
-#include "flock_session.hpp"
+#include "harbor_session.hpp"
 
 #include "duckdb/common/encryption_state.hpp"
 #include "duckdb/common/exception.hpp"
@@ -9,14 +9,14 @@
 
 namespace duckdb {
 
-FlockSession::FlockSession(string session_id_p) : session_id(std::move(session_id_p)) {
+HarborSession::HarborSession(string session_id_p) : session_id(std::move(session_id_p)) {
 }
 
-FlockSession::FlockSession(string session_id_p, string owner_principal_id_p)
+HarborSession::HarborSession(string session_id_p, string owner_principal_id_p)
     : session_id(std::move(session_id_p)), owner_principal_id(std::move(owner_principal_id_p)) {
 }
 
-FlockSession::~FlockSession() {
+HarborSession::~HarborSession() {
 }
 
 SessionManager::SessionManager(weak_ptr<DatabaseInstance> db_p) : db(std::move(db_p)) {
@@ -29,7 +29,7 @@ string SessionManager::CreateNewConnection(const string &session_id) {
 	std::lock_guard<std::mutex> lock(active_mutex);
 
 	if (active.find(session_id) != active.end()) {
-		throw InternalException("FlockSession id collision for '%s'", session_id);
+		throw InternalException("HarborSession id collision for '%s'", session_id);
 	}
 
 	auto db_locked = db.lock();
@@ -37,14 +37,14 @@ string SessionManager::CreateNewConnection(const string &session_id) {
 		throw InternalException("Database was closed");
 	}
 
-	auto session = make_shared_ptr<FlockSession>(session_id);
+	auto session = make_shared_ptr<HarborSession>(session_id);
 	session->duckdb_connection = make_uniq<Connection>(*db_locked);
 	session->duckdb_connection->context->config.enable_progress_bar = false;
 	active[session_id] = std::move(session);
 	return session_id;
 }
 
-shared_ptr<FlockSession> SessionManager::GetConnection(const string &session_id) {
+shared_ptr<HarborSession> SessionManager::GetConnection(const string &session_id) {
 	std::lock_guard<std::mutex> lock(active_mutex);
 	auto it = active.find(session_id);
 	if (it == active.end()) {
@@ -72,7 +72,7 @@ constexpr idx_t kSessionIdBytes = 16; // 128 bits, hex-encoded → 32 chars
 constexpr idx_t kDefaultMaxSessions = 1024; // SPEC §6 default
 
 // True iff `s` is a 64-char lowercase hex string. Matches the shape of
-// flock_crypto::PrincipalIdHex's output. Permits empty as a sentinel
+// harbor_crypto::PrincipalIdHex's output. Permits empty as a sentinel
 // for "anonymous" / legacy sessions (caller decides whether to allow).
 bool IsValidPrincipalHex(const string &s) {
 	if (s.size() != 64) {
@@ -95,7 +95,7 @@ idx_t ReadMaxSessionsSetting(weak_ptr<DatabaseInstance> &db) {
 	}
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(*db_locked);
-	if (!config.TryGetCurrentSetting("flock_max_sessions", setting_val) || setting_val.IsNull()) {
+	if (!config.TryGetCurrentSetting("harbor_max_sessions", setting_val) || setting_val.IsNull()) {
 		return kDefaultMaxSessions;
 	}
 	try {
@@ -157,11 +157,11 @@ string SessionManager::CreateOwnedSession(const string &session_id, const string
 		// SESSION_LIMIT". InvalidInputException is the closest
 		// portable exception type; the SQL handler maps it to a 429
 		// response with errorCode SESSION_LIMIT.
-		throw InvalidInputException("flock session limit reached (flock_max_sessions=%llu)",
+		throw InvalidInputException("harbor session limit reached (harbor_max_sessions=%llu)",
 		                            static_cast<unsigned long long>(max_sessions));
 	}
 	if (active.find(session_id) != active.end()) {
-		throw InternalException("FlockSession id collision for '%s'", session_id);
+		throw InternalException("HarborSession id collision for '%s'", session_id);
 	}
 
 	auto db_locked = db.lock();
@@ -169,14 +169,14 @@ string SessionManager::CreateOwnedSession(const string &session_id, const string
 		throw InternalException("Database was closed");
 	}
 
-	auto session = make_shared_ptr<FlockSession>(session_id, owner_principal_id);
+	auto session = make_shared_ptr<HarborSession>(session_id, owner_principal_id);
 	session->duckdb_connection = make_uniq<Connection>(*db_locked);
 	session->duckdb_connection->context->config.enable_progress_bar = false;
 	active[session_id] = std::move(session);
 	return session_id;
 }
 
-shared_ptr<FlockSession> SessionManager::LookupOwnedSession(const string &session_id, const string &principal_id) {
+shared_ptr<HarborSession> SessionManager::LookupOwnedSession(const string &session_id, const string &principal_id) {
 	std::lock_guard<std::mutex> lock(active_mutex);
 	auto it = active.find(session_id);
 	if (it == active.end()) {

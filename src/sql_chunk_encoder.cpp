@@ -37,7 +37,7 @@
 #include <utility>
 
 namespace duckdb {
-namespace flock_sql {
+namespace harbor_sql {
 
 namespace {
 
@@ -632,5 +632,5 @@ void SqlChunkEncoder::EmitOneShotWrite(JsonWriter &out, const std::string &sessi
 	out.EndObject();
 }
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

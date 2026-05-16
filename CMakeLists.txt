@@ -3,19 +3,19 @@ cmake_minimum_required(VERSION 3.5)
 # Build structure adapted from duckdb-quack and duckdb-ui, both MIT licensed.
 # See LICENSE for the derivative-work notice.
 
-set(TARGET_NAME flock)
+set(TARGET_NAME harbor)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
-# PR-3: flock now uses the OpenSSL-enabled cpp-httplib build
-# (duckdb_httplib_openssl namespace). FlockHttpServer's plain HTTP
+# PR-3: harbor now uses the OpenSSL-enabled cpp-httplib build
+# (duckdb_httplib_openssl namespace). HarborHttpServer's plain HTTP
 # listening doesn't actually USE TLS today, but the openssl variant is
 # what upstream duckdb-ui handlers use, so we standardize on it
 # throughout for one-namespace simplicity (see header comment in
-# src/include/flock_http_server.hpp). This requires linking OpenSSL
+# src/include/harbor_http_server.hpp). This requires linking OpenSSL
 # explicitly; mirrors duckdb-ui's CMakeLists pattern.
 find_package(OpenSSL REQUIRED)
 

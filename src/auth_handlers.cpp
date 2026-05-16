@@ -1,9 +1,9 @@
 #include "auth_handlers.hpp"
 
-#include "flock_auth.hpp"
-#include "flock_crypto.hpp"
-#include "flock_http_server.hpp"
-#include "flock_session.hpp"
+#include "harbor_auth.hpp"
+#include "harbor_crypto.hpp"
+#include "harbor_http_server.hpp"
+#include "harbor_session.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -28,7 +28,7 @@ constexpr size_t kMaxLoginBodyBytes = 4096;
 // Access-Control-Allow-Headers when CORS is enabled and the request
 // Origin matches the allow-list. Per SPEC §7.
 constexpr const char *kAllowedCorsHeaders =
-    "Authorization, Content-Type, X-Flock-Token, X-Flock-Session-Id, Accept";
+    "Authorization, Content-Type, X-Harbor-Token, X-Harbor-Session-Id, Accept";
 
 // Cap on Set-Cookie Max-Age. ~10 years; far above the 12h default but
 // finite so a misconfigured setting can't produce a session-effectively-
@@ -162,7 +162,7 @@ void ApplyCorsHeaders(AuthManager &auth, const duckdb_httplib_openssl::Request &
 
 } // namespace
 
-AuthHandlers::AuthHandlers(FlockHttpServer &server_p, AuthManager &auth_p, SessionManager &sessions_p)
+AuthHandlers::AuthHandlers(HarborHttpServer &server_p, AuthManager &auth_p, SessionManager &sessions_p)
     : server(server_p), auth(auth_p), sessions(sessions_p) {
 }
 
@@ -176,7 +176,7 @@ uint64_t AuthHandlers::CookieTtlSec() {
 	}
 	Value setting_val;
 	auto &config = DBConfig::GetConfig(*db_locked);
-	if (!config.TryGetCurrentSetting("flock_auth_cookie_ttl_s", setting_val) || setting_val.IsNull()) {
+	if (!config.TryGetCurrentSetting("harbor_auth_cookie_ttl_s", setting_val) || setting_val.IsNull()) {
 		return kDefaultCookieTtlSec;
 	}
 	try {
@@ -223,7 +223,7 @@ bool AuthHandlers::RequestIsBehindHttps(const duckdb_httplib_openssl::Request &r
 
 void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
                                duckdb_httplib_openssl::Response &res) {
-	FlockHttpServer::ActiveRequestGuard guard(server);
+	HarborHttpServer::ActiveRequestGuard guard(server);
 	ApplyCorsHeaders(auth, req, res);
 
 	// Token resolution precedence on /auth/login (different from the
@@ -232,19 +232,19 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 	// the user-pasted token there):
 	//
 	//   1. Authorization: Bearer <token>
-	//   2. X-Flock-Token: <token>
+	//   2. X-Harbor-Token: <token>
 	//   3. JSON body {"token":"<token>"}
 	//
 	// We accept all three so curl users, browser users, and
 	// programmatic clients can all reach this endpoint naturally.
 	string token;
 	auto auth_header = req.get_header_value("Authorization");
-	auto x_flock = req.get_header_value("X-Flock-Token");
+	auto x_harbor = req.get_header_value("X-Harbor-Token");
 	if (!auth_header.empty() && auth_header.size() > 7 &&
 	    auth_header.compare(0, 7, "Bearer ") == 0) {
 		token = TrimCopy(auth_header.substr(7));
-	} else if (!x_flock.empty()) {
-		token = TrimCopy(x_flock);
+	} else if (!x_harbor.empty()) {
+		token = TrimCopy(x_harbor);
 	} else if (!req.body.empty()) {
 		if (req.body.size() > kMaxLoginBodyBytes) {
 			WriteJsonError(res, 413, "BODY_TOO_LARGE",
@@ -256,7 +256,7 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 
 	if (token.empty()) {
 		WriteJsonError(res, 400, "MISSING_CREDENTIAL",
-		               "/auth/login requires Authorization, X-Flock-Token, or {\"token\":\"...\"} body");
+		               "/auth/login requires Authorization, X-Harbor-Token, or {\"token\":\"...\"} body");
 		return;
 	}
 
@@ -268,13 +268,13 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 
-	auto principal_hex = flock_crypto::PrincipalIdHex(token);
+	auto principal_hex = harbor_crypto::PrincipalIdHex(token);
 	auto ttl_s = CookieTtlSec();
 	auto cookie_value = auth.IssueCookie(principal_hex, ttl_s);
 
 	// Cookie attributes per SPEC §7. HttpOnly: prevents JS read
 	// (XSS exfiltration). SameSite=Strict: prevents cross-site
-	// reuse. Path=/: cookie sent for every flock route. Secure:
+	// reuse. Path=/: cookie sent for every harbor route. Secure:
 	// only when the reverse proxy reports HTTPS upstream.
 	std::ostringstream cookie;
 	cookie << kCookieName << '=' << cookie_value
@@ -293,7 +293,7 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 	                              .count()) +
 	    ttl_s;
 	auto body = StringUtil::Format("{\"principal\":\"%s\",\"expires_at\":\"%s\"}",
-	                               EscapeJsonString(flock_crypto::PrincipalAbbrev(principal_hex)),
+	                               EscapeJsonString(harbor_crypto::PrincipalAbbrev(principal_hex)),
 	                               EscapeJsonString(IsoUtcFromUnix(expires_unix)));
 	res.status = 200;
 	res.set_content(body, "application/json");
@@ -301,7 +301,7 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 
 void AuthHandlers::HandleLogout(const duckdb_httplib_openssl::Request &req,
                                 duckdb_httplib_openssl::Response &res) {
-	FlockHttpServer::ActiveRequestGuard guard(server);
+	HarborHttpServer::ActiveRequestGuard guard(server);
 	ApplyCorsHeaders(auth, req, res);
 
 	// /auth/logout always returns 200 — never reveal whether the
@@ -341,7 +341,7 @@ void AuthHandlers::HandleLogout(const duckdb_httplib_openssl::Request &req,
 
 void AuthHandlers::HandlePreflight(const duckdb_httplib_openssl::Request &req,
                                    duckdb_httplib_openssl::Response &res) {
-	FlockHttpServer::ActiveRequestGuard guard(server);
+	HarborHttpServer::ActiveRequestGuard guard(server);
 
 	// Only emit CORS preflight headers when the request Origin is in
 	// the allow-list. A bare 204 with no CORS headers tells the
@@ -384,7 +384,7 @@ void AuthHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// be the source of correctness.
 	auto method_not_allowed = [self](const duckdb_httplib_openssl::Request &req,
 	                                  duckdb_httplib_openssl::Response &res) {
-		FlockHttpServer::ActiveRequestGuard guard(self->server);
+		HarborHttpServer::ActiveRequestGuard guard(self->server);
 		res.set_header("Allow", "POST, OPTIONS");
 		WriteJsonError(res, 405, "METHOD_NOT_ALLOWED",
 		               StringUtil::Format("only POST is allowed on %s", req.path));

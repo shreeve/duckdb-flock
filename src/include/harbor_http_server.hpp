@@ -1,12 +1,12 @@
 #pragma once
 
-// FlockHttpServer — owns the cpp-httplib Server, listener thread, and
+// HarborHttpServer — owns the cpp-httplib Server, listener thread, and
 // shared subsystems (SessionManager, AuthManager). PR-2's central
 // architectural piece.
 //
 // PR-2 invariant (enforced by a CI grep guard):
 //
-//   grep -R "duckdb_httplib::Server" src | grep -v flock_http_server
+//   grep -R "duckdb_httplib::Server" src | grep -v harbor_http_server
 //
 // must produce no matches. Exactly one duckdb_httplib::Server instance
 // exists in the process; only this file constructs or owns it. Handler
@@ -14,12 +14,12 @@
 // SqlHandlers) get a reference via Server() and register their routes
 // against it — they MUST NOT call server.stop() themselves.
 //
-// FlockServerState is a process-static singleton holding the running
-// FlockHttpServer (single-server-per-process per SPEC §2). Both the
-// "quack" and "flock" StorageExtension keys point at the same global
-// instance — Find("quack").state == Find("flock").state ==
-// &FlockServerState::Global() — so stock-quack ATTACH callers and
-// flock-aware tooling see the same lifecycle.
+// HarborServerState is a process-static singleton holding the running
+// HarborHttpServer (single-server-per-process per SPEC §2). Both the
+// "quack" and "harbor" StorageExtension keys point at the same global
+// instance — Find("quack").state == Find("harbor").state ==
+// &HarborServerState::Global() — so stock-quack ATTACH callers and
+// harbor-aware tooling see the same lifecycle.
 
 #include <atomic>
 #include <chrono>
@@ -65,13 +65,13 @@ namespace ui {
 class UiHandlers;
 }
 
-// FlockHttpServer owns the cpp-httplib Server, listener thread, and
+// HarborHttpServer owns the cpp-httplib Server, listener thread, and
 // per-server subsystems. Construction is ctor → Bind() →
 // RegisterBuiltinHandlers() → StartListening(). Shutdown is
 // StopAccepting() (close socket, safe from any thread) followed by
 // Close() (drain in-flight workers, join listener; NOT safe from a
 // worker thread).
-class FlockHttpServer {
+class HarborHttpServer {
 public:
 	enum class State : uint8_t {
 		CONSTRUCTED, // ctor done; Bind() not yet called
@@ -81,11 +81,11 @@ public:
 		CLOSED,      // Close() done; safe to destroy
 	};
 
-	FlockHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
-	~FlockHttpServer();
+	HarborHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
+	~HarborHttpServer();
 
-	FlockHttpServer(const FlockHttpServer &) = delete;
-	FlockHttpServer &operator=(const FlockHttpServer &) = delete;
+	HarborHttpServer(const HarborHttpServer &) = delete;
+	HarborHttpServer &operator=(const HarborHttpServer &) = delete;
 
 	// Synchronously bind the listening socket. Throws IOException if bind
 	// fails (EADDRINUSE, permission denied, invalid host/port). Configures
@@ -155,7 +155,7 @@ public:
 	}
 
 	// Subsystems borrowed by reference from handler ctors. Both are
-	// constructed in FlockHttpServer's ctor so they outlive every handler
+	// constructed in HarborHttpServer's ctor so they outlive every handler
 	// that captures references to them.
 	SessionManager &Sessions();
 	AuthManager &Auth();
@@ -166,19 +166,19 @@ public:
 	//
 	// Usage in a handler lambda:
 	//   server->Server().Post("/quack", [h](req, res, reader) {
-	//     FlockHttpServer::ActiveRequestGuard guard(h->server);
+	//     HarborHttpServer::ActiveRequestGuard guard(h->server);
 	//     // ... handle request ...
 	//   });
 	class ActiveRequestGuard {
 	public:
-		explicit ActiveRequestGuard(FlockHttpServer &srv);
+		explicit ActiveRequestGuard(HarborHttpServer &srv);
 		~ActiveRequestGuard();
 
 		ActiveRequestGuard(const ActiveRequestGuard &) = delete;
 		ActiveRequestGuard &operator=(const ActiveRequestGuard &) = delete;
 
 	private:
-		FlockHttpServer &srv;
+		HarborHttpServer &srv;
 	};
 
 private:
@@ -203,7 +203,7 @@ private:
 	// Concrete handler ownership. Route lambdas registered against the
 	// httplib server capture `quack_handlers.get()` / `admin_handlers.get()` /
 	// `ui_handlers.get()` via `this`. These pointers stay valid until
-	// ~FlockHttpServer (which requires Close() to have drained workers first).
+	// ~HarborHttpServer (which requires Close() to have drained workers first).
 	unique_ptr<QuackHandlers> quack_handlers;
 	unique_ptr<AdminHandlers> admin_handlers;
 	unique_ptr<AuthHandlers> auth_handlers;
@@ -213,25 +213,25 @@ private:
 	// Listener-thread entry. Catches everything so an exception in the
 	// listener never escapes (which would call std::terminate and abort
 	// the host process).
-	static void ListenThreadMain(FlockHttpServer *srv);
+	static void ListenThreadMain(HarborHttpServer *srv);
 
 	// Wait for active_requests to reach 0 or for the timeout. Returns
 	// true if drained cleanly, false if timed out.
 	bool DrainActiveRequests(std::chrono::seconds timeout);
 };
 
-// Process-static singleton holding the (single) running FlockHttpServer
+// Process-static singleton holding the (single) running HarborHttpServer
 // per SPEC §2. Generation counter pattern (per GPT-5.5 round 5 catch
 // #12) so that Wait() can correctly distinguish "the server I was
 // waiting on stopped" from "a new server started after my wait began".
-class FlockServerState {
+class HarborServerState {
 public:
 	// The single shared state for the entire process. Both the "quack"
-	// and "flock" StorageExtension keys point at this same object.
-	static FlockServerState &Global();
+	// and "harbor" StorageExtension keys point at this same object.
+	static HarborServerState &Global();
 
-	FlockServerState(const FlockServerState &) = delete;
-	FlockServerState &operator=(const FlockServerState &) = delete;
+	HarborServerState(const HarborServerState &) = delete;
+	HarborServerState &operator=(const HarborServerState &) = delete;
 
 	// Start the server. Throws InvalidInputException if a server is
 	// already running (single-server-per-process). Increments the
@@ -260,16 +260,16 @@ public:
 	// For introspection (quack_server_list etc). The functor runs while
 	// state_mu is held — caller MUST NOT block in fn or capture the
 	// server reference beyond the call.
-	void WithCurrent(const std::function<void(FlockHttpServer &)> &fn);
+	void WithCurrent(const std::function<void(HarborHttpServer &)> &fn);
 
 private:
-	FlockServerState() = default;
-	~FlockServerState() = default;
+	HarborServerState() = default;
+	~HarborServerState() = default;
 
 	mutable std::mutex state_mu;
 	std::condition_variable cv;
 
-	unique_ptr<FlockHttpServer> server;
+	unique_ptr<HarborHttpServer> server;
 	uint64_t generation = 0;
 	uint64_t stopped_generation = 0;
 };

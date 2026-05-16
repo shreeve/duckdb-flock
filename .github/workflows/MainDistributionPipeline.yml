@@ -3,7 +3,7 @@
 # PR-1: scaffold only. Builds linux_amd64 via the reduced-CI matrix to
 # keep iteration fast while we vendor and rename quack. The full
 # osx_arm64 / osx_amd64 / linux_arm64 / windows_amd64 matrix lights up
-# in PR-2 (FlockHttpServer skeleton) or PR-3 (UI port) per the
+# in PR-2 (HarborHttpServer skeleton) or PR-3 (UI port) per the
 # AGENTS.md "Implementation roadmap".
 #
 # Adapted from duckdb-quack's MainDistributionPipeline.yml; same
@@ -26,5 +26,5 @@ jobs:
     with:
       duckdb_version: v1.5.2
       ci_tools_version: v1.5-variegata
-      extension_name: flock
+      extension_name: harbor
       reduced_ci_mode: 'enabled'

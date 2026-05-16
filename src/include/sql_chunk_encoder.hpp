@@ -45,7 +45,7 @@ namespace duckdb {
 class DataChunk;
 class LogicalType;
 
-namespace flock_sql {
+namespace harbor_sql {
 
 class JsonWriter;
 
@@ -112,5 +112,5 @@ private:
 	std::vector<LogicalType> column_types;
 };
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

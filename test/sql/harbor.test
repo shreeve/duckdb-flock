@@ -1,39 +1,39 @@
-# name: test/sql/flock.test
+# name: test/sql/harbor.test
 # description: PR-1 smoke + /quack runtime roundtrip (the regression
 #              baseline for PR-2's architectural refactor)
 # group: [sql]
 #
 # Verifies:
-#   1. The flock extension loads and exports flock-named identifiers
+#   1. The harbor extension loads and exports harbor-named identifiers
 #      (smoke surface — proves static-link + SQL-surface registration).
 #   2. quack_serve starts a server, the wire format on POST /quack works
 #      end-to-end (a quack-protocol client successfully attaches and
 #      runs queries), and quack_stop tears it down cleanly.
 #
-# This file IS the regression harness for PR-2's FlockHttpServer
+# This file IS the regression harness for PR-2's HarborHttpServer
 # extraction. When PR-2 dissolves QuackServer's embedded httplib::Server
-# into a shared FlockHttpServer, every assertion in this file must
+# into a shared HarborHttpServer, every assertion in this file must
 # remain green. Modeled on duckdb-quack's test/sql/rpc.test (same
 # con1/con2 pattern); kept narrower to focus on what PR-2 might break.
 
-require flock
+require harbor
 
 require httpfs
 
 statement ok
-LOAD flock;
+LOAD harbor;
 
 # ------------------------------------------------------------------
-# Smoke surface — extension loaded, flock-named identifiers reachable
+# Smoke surface — extension loaded, harbor-named identifiers reachable
 # ------------------------------------------------------------------
 
 query I
-SELECT CASE WHEN flock_version() IS NOT NULL THEN 1 ELSE 0 END;
+SELECT CASE WHEN harbor_version() IS NOT NULL THEN 1 ELSE 0 END;
 ----
 1
 
 query I
-SELECT CASE WHEN length(flock_version()) > 0 THEN 1 ELSE 0 END;
+SELECT CASE WHEN length(harbor_version()) > 0 THEN 1 ELSE 0 END;
 ----
 1
 
@@ -53,9 +53,9 @@ set ignore_error_messages __none__
 # minimize the chance of a stale process or a parallel job colliding
 # with us. quack_serve accepts `quack:host:port`.
 query III con1
-CALL quack_serve('quack:localhost:19494', token='flock-test-token');
+CALL quack_serve('quack:localhost:19494', token='harbor-test-token');
 ----
-quack:localhost:19494	http://localhost:19494	flock-test-token
+quack:localhost:19494	http://localhost:19494	harbor-test-token
 
 # Wait for the listener thread to finish binding. 500ms is conservative
 # but cheap; the upstream test uses 100ms but flakiness in CI under
@@ -68,13 +68,13 @@ sleep 500 millisecond
 # PREPARE_RESPONSE → DISCONNECT_MESSAGE — encoded with the upstream
 # BinarySerializer at the pinned compatibility version.
 query I con2
-FROM quack_query('quack:localhost:19494', 'SELECT 42', token='flock-test-token')
+FROM quack_query('quack:localhost:19494', 'SELECT 42', token='harbor-test-token')
 ----
 42
 
 # Auth failure: wrong token rejected. Verifies authentication callback
 # resolution (quack_authentication_function setting → quack_check_token
-# default → string compare) still works after our flock-specific edits
+# default → string compare) still works after our harbor-specific edits
 # to quack_extension.cpp.
 statement error con2
 FROM quack_query('quack:localhost:19494', 'SELECT 42', token='wrong-token')
@@ -84,7 +84,7 @@ Authentication failed
 # Secret-based auth: store token in a secret, omit from the call.
 # Exercises the QuackSecret type registration.
 statement ok con2
-CREATE SECRET (TYPE quack, TOKEN 'flock-test-token', SCOPE 'quack:localhost:19494')
+CREATE SECRET (TYPE quack, TOKEN 'harbor-test-token', SCOPE 'quack:localhost:19494')
 
 query I con2
 FROM quack_query('quack:localhost:19494', 'SELECT 42')
@@ -112,7 +112,7 @@ SELECT max(range) FROM quack_query('quack:localhost:19494', 'FROM range(100000)'
 # the PR-2 refactor of session lifecycle). Idempotent setup so that a
 # stale state from a previous run doesn't fail the test.
 query I con2
-FROM quack_query('quack:localhost:19494', 'DROP TABLE IF EXISTS flock_test_t; CREATE TABLE flock_test_t(i INT); INSERT INTO flock_test_t VALUES (1), (2), (3); SELECT count(*) FROM flock_test_t')
+FROM quack_query('quack:localhost:19494', 'DROP TABLE IF EXISTS harbor_test_t; CREATE TABLE harbor_test_t(i INT); INSERT INTO harbor_test_t VALUES (1), (2), (3); SELECT count(*) FROM harbor_test_t')
 ----
 3
 
@@ -138,85 +138,85 @@ IO Error
 # page HTML, etc.) lives in scripts/golden-cookie-auth.sh. The block
 # below covers what's testable via SQL alone: setting registration,
 # default values, and the refuse-to-start invariants on
-# flock_cors_origins.
+# harbor_cors_origins.
 
 # New PR-4 settings exist with documented defaults.
 query I
-SELECT current_setting('flock_auth_cookie_ttl_s')
+SELECT current_setting('harbor_auth_cookie_ttl_s')
 ----
 43200
 
 query I
-SELECT current_setting('flock_cors_origins')
+SELECT current_setting('harbor_cors_origins')
 ----
 (empty)
 
 query I
-SELECT current_setting('flock_local_dev_mode')
+SELECT current_setting('harbor_local_dev_mode')
 ----
 false
 
-# flock_cookie_signing_key is intentionally NOT a setting (security
+# harbor_cookie_signing_key is intentionally NOT a setting (security
 # review — would let any SQL caller mint cookies). Confirm it's
 # absent from the SQL surface.
 statement error
-SELECT current_setting('flock_cookie_signing_key')
+SELECT current_setting('harbor_cookie_signing_key')
 ----
 unrecognized
 
-# Refuse-to-start: flock_cors_origins='*' must throw at flock_serve
+# Refuse-to-start: harbor_cors_origins='*' must throw at harbor_serve
 # time. SPEC §7 forbids wildcard-with-credentials.
 statement ok
-SET GLOBAL flock_cors_origins='*'
+SET GLOBAL harbor_cors_origins='*'
 
 statement error
-CALL flock_serve('quack:localhost:19495', token='flock-cors-test')
+CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
 ----
-flock_cors_origins='*' is forbidden
+harbor_cors_origins='*' is forbidden
 
-# Reset to a sane value and confirm flock_serve succeeds. Use a
+# Reset to a sane value and confirm harbor_serve succeeds. Use a
 # specific allowed origin (not the wildcard).
 statement ok
-SET GLOBAL flock_cors_origins='https://app.example.com,http://localhost:3000'
+SET GLOBAL harbor_cors_origins='https://app.example.com,http://localhost:3000'
 
 query III con1
-CALL flock_serve('quack:localhost:19495', token='flock-cors-test')
+CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
 ----
-quack:localhost:19495	http://localhost:19495	flock-cors-test
+quack:localhost:19495	http://localhost:19495	harbor-cors-test
 
 statement ok con1
-CALL flock_stop('quack:localhost:19495')
+CALL harbor_stop('quack:localhost:19495')
 
 # Refuse-to-start: malformed origin (has path) is rejected.
 statement ok
-SET GLOBAL flock_cors_origins='https://app.example.com/admin'
+SET GLOBAL harbor_cors_origins='https://app.example.com/admin'
 
 statement error
-CALL flock_serve('quack:localhost:19495', token='flock-cors-test')
+CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
 ----
 must be scheme://host[:port]
 
 # Refuse-to-start: bare hostname without scheme is rejected.
 statement ok
-SET GLOBAL flock_cors_origins='app.example.com'
+SET GLOBAL harbor_cors_origins='app.example.com'
 
 statement error
-CALL flock_serve('quack:localhost:19495', token='flock-cors-test')
+CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
 ----
 no scheme
 
 # Refuse-to-start: non-http(s) scheme is rejected.
 statement ok
-SET GLOBAL flock_cors_origins='ftp://app.example.com'
+SET GLOBAL harbor_cors_origins='ftp://app.example.com'
 
 statement error
-CALL flock_serve('quack:localhost:19495', token='flock-cors-test')
+CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
 ----
 must use http or https scheme
 
 # Reset for any later tests in the file.
 statement ok
-RESET GLOBAL flock_cors_origins
+RESET GLOBAL harbor_cors_origins
 
 # ------------------------------------------------------------------
 # PR-5: /sql settings — SQL-testable surface
@@ -227,16 +227,16 @@ RESET GLOBAL flock_cors_origins
 # registration/defaults.
 
 query I
-SELECT current_setting('flock_max_sessions')
+SELECT current_setting('harbor_max_sessions')
 ----
 1024
 
 query I
-SELECT current_setting('flock_max_response_rows')
+SELECT current_setting('harbor_max_response_rows')
 ----
 0
 
 query I
-SELECT current_setting('flock_max_request_body_bytes')
+SELECT current_setting('harbor_max_request_body_bytes')
 ----
 268435456

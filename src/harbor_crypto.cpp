@@ -1,4 +1,4 @@
-#include "flock_crypto.hpp"
+#include "harbor_crypto.hpp"
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -11,7 +11,7 @@
 #include <stdexcept>
 
 namespace duckdb {
-namespace flock_crypto {
+namespace harbor_crypto {
 
 namespace {
 
@@ -207,5 +207,5 @@ std::string PrincipalAbbrev(const std::string &principal_hex) {
 	return principal_hex.substr(0, 8);
 }
 
-} // namespace flock_crypto
+} // namespace harbor_crypto
 } // namespace duckdb

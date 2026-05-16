@@ -2,8 +2,8 @@
 
 # Extension from this repo. LOAD_TESTS opts the sqllogictests under
 # test/sql/ into DuckDB's unittest binary discovery — without this,
-# test/sql/flock.test exists but never runs in CI.
-duckdb_extension_load(flock
+# test/sql/harbor.test exists but never runs in CI.
+duckdb_extension_load(harbor
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
 )

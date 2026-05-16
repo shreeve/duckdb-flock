@@ -6,7 +6,7 @@
 #include <cstring>
 
 namespace duckdb {
-namespace flock_sql {
+namespace harbor_sql {
 
 namespace {
 
@@ -349,5 +349,5 @@ void JsonWriter::WriteEscapedString(const char *s, std::size_t len) {
 	buf.push_back('"');
 }
 
-} // namespace flock_sql
+} // namespace harbor_sql
 } // namespace duckdb

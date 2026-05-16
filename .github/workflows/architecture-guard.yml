@@ -1,5 +1,5 @@
 # Architecture invariant: exactly one duckdb_httplib::Server in the
-# process, owned by FlockHttpServer (per AGENTS.md PR-2 acceptance
+# process, owned by HarborHttpServer (per AGENTS.md PR-2 acceptance
 # checklist). This guard catches future regressions where another
 # subsystem accidentally constructs its own httplib server instead
 # of registering routes against the shared one.
@@ -37,22 +37,22 @@ jobs:
       - name: grep for stray httplib::Server owners (both namespaces)
         run: |
           set -e
-          echo "Checking that httplib::Server is owned only by flock_http_server.{cpp,hpp}..."
-          # PR-3 migration: FlockHttpServer's underlying type changed
+          echo "Checking that httplib::Server is owned only by harbor_http_server.{cpp,hpp}..."
+          # PR-3 migration: HarborHttpServer's underlying type changed
           # from duckdb_httplib::Server (plain) to duckdb_httplib_openssl::Server
           # (OpenSSL-enabled). The single-owner invariant from PR-2's
           # acceptance checklist still holds — this guard now matches
           # ownership patterns for BOTH namespaces, so accidental
-          # reintroduction of either variant in a non-FlockHttpServer file
+          # reintroduction of either variant in a non-HarborHttpServer file
           # gets caught.
           PATTERN='(make_uniq|unique_ptr|shared_ptr)<\s*duckdb_httplib(_openssl)?::Server\s*>'
           if grep -REn --include='*.cpp' --include='*.hpp' "$PATTERN" src \
-               | grep -v "src/include/flock_http_server.hpp" \
-               | grep -v "src/flock_http_server.cpp"; then
+               | grep -v "src/include/harbor_http_server.hpp" \
+               | grep -v "src/harbor_http_server.cpp"; then
             echo ""
             echo "ERROR: httplib::Server (plain or _openssl) is constructed or"
-            echo "owned outside src/flock_http_server.{cpp,hpp}. Per AGENTS.md"
-            echo "PR-2 acceptance checklist, FlockHttpServer is the only owner."
+            echo "owned outside src/harbor_http_server.{cpp,hpp}. Per AGENTS.md"
+            echo "PR-2 acceptance checklist, HarborHttpServer is the only owner."
             echo ""
             echo "If this is intentional, update the allow-list in"
             echo ".github/workflows/architecture-guard.yml AND document the change"

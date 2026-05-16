@@ -2,28 +2,29 @@
 // and docs/upstream-quack-patches.md for the rebase process.
 //
 // This file is duckdb-quack's quack_extension.cpp at v1.5-variegata
-// (commit 90bd70e), with five minimal flock-specific edits:
+// (commit 90bd70e), with five minimal harbor-specific edits:
 //
 //   1. The DUCKDB_CPP_EXTENSION_ENTRY symbol is renamed from `quack` to
-//      `flock` so DuckDB locates the right entry point when loading
-//      flock.duckdb_extension.
-//   2. The reported version macro is `EXT_VERSION_FLOCK` (DuckDB's build
+//      `harbor` so DuckDB locates the right entry point when loading
+//      harbor.duckdb_extension.
+//   2. The reported version macro is `EXT_VERSION_HARBOR` (DuckDB's build
 //      system auto-defines this from the extension name) instead of
 //      `EXT_VERSION_RPC` (which corresponded to upstream's EXT_NAME=rpc).
-//   3. A new `flock_version()` scalar function is registered alongside
+//   3. A new `harbor_version()` scalar function is registered alongside
 //      the upstream `quack_*` SQL surface, so a smoke test can verify
-//      the extension loaded and exports flock-named identifiers.
-//   4. `QuackExtension::Name()` returns "flock" so the C++ Extension
+//      the extension loaded and exports harbor-named identifiers.
+//   4. `QuackExtension::Name()` returns "harbor" so the C++ Extension
 //      class identity matches the loadable extension name. The class
 //      is still spelled QuackExtension to keep the diff minimal; only
 //      its reported Name() changes.
-//   5. `loader.SetDescription(...)` text reflects flock's purpose
+//   5. `loader.SetDescription(...)` text reflects harbor's purpose
 //      (visible in `duckdb_extensions()` listing).
 //
-// Everything else — SQL function/setting names, wire format,
-// QuackServer's embedded httplib::Server — is preserved unchanged. The
-// architectural refactor that extracts httplib::Server from QuackServer
-// into a shared FlockHttpServer lands in PR-2.
+// The upstream Quack wire format and Quack-compatible SQL surface are
+// preserved unchanged (`quack_*`, `quack:`, `/quack`). Harbor-owned
+// lifecycle/settings/auth names are registered alongside that compatibility
+// layer. The architectural refactor that extracts httplib::Server from
+// QuackServer into a shared HarborHttpServer lands in PR-2.
 
 #define DUCKDB_EXTENSION_MAIN
 
@@ -51,8 +52,8 @@
 #include "include/quack_storage.hpp"
 #include "include/quack_uri.hpp"
 
-// PR-2: flock-original lifecycle functions registered alongside quack_*.
-#include "flock_lifecycle.hpp"
+// PR-2: harbor-original lifecycle functions registered alongside quack_*.
+#include "harbor_lifecycle.hpp"
 
 // PR-3: UI extension state + settings registration.
 #include "settings.hpp"     // UI_LOCAL_PORT_SETTING_NAME et al.
@@ -117,15 +118,15 @@ static void QuackDummyAuthorization(const DataChunk &args, ExpressionState &, Ve
 	result.SetValue(0, Value(true)); // choose life
 }
 
-// flock-specific: returns the build's extension version string. Lets a
-// smoke test confirm the extension loaded and that flock-named symbols
+// harbor-specific: returns the build's extension version string. Lets a
+// smoke test confirm the extension loaded and that harbor-named symbols
 // are reachable, without depending on any upstream quack surface.
 //
 // Implemented as a constant-vector reference so the result is correct
-// regardless of cardinality (e.g. `SELECT flock_version() FROM range(10)`).
-static void FlockVersionScalar(const DataChunk &, ExpressionState &, Vector &result) {
-#ifdef EXT_VERSION_FLOCK
-	Value version(EXT_VERSION_FLOCK);
+// regardless of cardinality (e.g. `SELECT harbor_version() FROM range(10)`).
+static void HarborVersionScalar(const DataChunk &, ExpressionState &, Vector &result) {
+#ifdef EXT_VERSION_HARBOR
+	Value version(EXT_VERSION_HARBOR);
 #else
 	Value version("unknown");
 #endif
@@ -161,16 +162,16 @@ static TableFunction GetQuackIdentifyFunction() {
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
-	loader.SetDescription("flock — DuckDB as an HTTP service (PR-2: FlockHttpServer)");
+	loader.SetDescription("harbor — DuckDB as an HTTP service (PR-2: HarborHttpServer)");
 
-	// flock-specific: SELECT flock_version() as the smoke-test surface.
+	// harbor-specific: SELECT harbor_version() as the smoke-test surface.
 	// Not volatile — the build's version string is deterministic for the
 	// lifetime of the process.
-	ScalarFunction flock_version_fun("flock_version", {}, LogicalType::VARCHAR, FlockVersionScalar);
-	loader.RegisterFunction(flock_version_fun);
+	ScalarFunction harbor_version_fun("harbor_version", {}, LogicalType::VARCHAR, HarborVersionScalar);
+	loader.RegisterFunction(harbor_version_fun);
 
 	// Vendored quack table functions. quack_serve / quack_stop are now
-	// thin shims that delegate to FlockServerState::Global() (see
+	// thin shims that delegate to HarborServerState::Global() (see
 	// src/quack/quack_start_stop.cpp).
 	loader.RegisterFunction(QuackScanFunction::GetFunction());
 	loader.RegisterFunction(QuackScanByNameFunction::GetFunction());
@@ -180,14 +181,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(QuackClearCacheFunction::GetFunction());
 	loader.RegisterFunction(GetQuackIdentifyFunction());
 
-	// flock-named lifecycle functions per SPEC §9. Same underlying
-	// FlockServerState as quack_serve/stop above, but a different SQL
-	// surface — flock_serve uses "flock:" defaults, flock_wait blocks
+	// harbor-named lifecycle functions per SPEC §9. Same underlying
+	// HarborServerState as quack_serve/stop above, but a different SQL
+	// surface — harbor_serve uses "harbor:" defaults, harbor_wait blocks
 	// for daemon-mode init scripts (no quack_wait alias because
 	// upstream never had one).
-	loader.RegisterFunction(FlockServeFunction::GetFunction());
-	loader.RegisterFunction(FlockStopFunction::GetFunction());
-	loader.RegisterFunction(FlockWaitFunction::GetFunction());
+	loader.RegisterFunction(HarborServeFunction::GetFunction());
+	loader.RegisterFunction(HarborStopFunction::GetFunction());
+	loader.RegisterFunction(HarborWaitFunction::GetFunction());
 
 	// the default authentication function
 	ScalarFunction quack_check_token("quack_check_token",
@@ -197,13 +198,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	quack_check_token.SetVolatile();
 	loader.RegisterFunction(quack_check_token);
 
+	ScalarFunction harbor_check_token("harbor_check_token",
+	                                  {/* session id */ LogicalType::VARCHAR, /* auth string */ LogicalType::VARCHAR,
+	                                   /* token */ LogicalType::VARCHAR},
+	                                  LogicalType::BOOLEAN, QuackAuthToken);
+	harbor_check_token.SetVolatile();
+	loader.RegisterFunction(harbor_check_token);
+
 	ScalarFunction rpc_authorization("quack_nop_authorization",
 	                                 {/* session id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
 	                                 LogicalType::BOOLEAN, QuackDummyAuthorization);
 	rpc_authorization.SetVolatile();
 	loader.RegisterFunction(rpc_authorization);
 
+	ScalarFunction harbor_authorization("harbor_nop_authorization",
+	                                    {/* session id */ LogicalType::VARCHAR, /* query string */ LogicalType::VARCHAR},
+	                                    LogicalType::BOOLEAN, QuackDummyAuthorization);
+	harbor_authorization.SetVolatile();
+	loader.RegisterFunction(harbor_authorization);
+
 	loader.RegisterFunction(QuackParseUriFunction::GetFunction());
+	loader.RegisterFunction(QuackParseUriFunction::GetHarborFunction());
 
 	RegisterQuackSecretType(loader);
 
@@ -212,12 +227,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register the QuackStorageExtension under the "quack" key so
 	// `ATTACH 'quack:host'` works for stock-quack clients. PR-2: the
 	// storage_info no longer carries state (server lifecycle moved to
-	// FlockServerState::Global()), but the registration shape is
+	// HarborServerState::Global()), but the registration shape is
 	// unchanged for compatibility.
 	auto ext = duckdb::make_shared_ptr<QuackStorageExtension>();
 	ext->storage_info = duckdb::make_uniq<QuackStorageExtensionInfo>();
 	StorageExtension::Register(loader.GetDatabaseInstance().config, QuackStorageExtensionInfo::STORAGE_EXTENSION_KEY,
 	                           ext);
+
+	auto harbor_ext = duckdb::make_shared_ptr<QuackStorageExtension>();
+	harbor_ext->storage_info = duckdb::make_uniq<QuackStorageExtensionInfo>();
+	StorageExtension::Register(loader.GetDatabaseInstance().config,
+	                           QuackStorageExtensionInfo::HARBOR_STORAGE_EXTENSION_KEY, harbor_ext);
 
 	// PR-3: Register the UI StorageExtension under the "ui" key so
 	// UiHandlers can look up its per-tab connection pool via
@@ -231,10 +251,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	StorageExtension::Register(loader.GetDatabaseInstance().config, STORAGE_EXTENSION_KEY, ui_ext);
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.AddExtensionOption("quack_authentication_function", "Name of a callback function for authentication",
-	                          LogicalType::VARCHAR, Value("quack_check_token"), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("quack_authorization_function", "Name of a callback function for authorization",
-	                          LogicalType::VARCHAR, Value("quack_nop_authorization"), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("harbor_authentication_function", "Name of a Harbor callback function for authentication",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("harbor_authorization_function", "Name of a Harbor callback function for authorization",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_authentication_function", "Name of a Quack-compatible callback function for authentication",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("quack_authorization_function", "Name of a Quack-compatible callback function for authorization",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
 
 	config.AddExtensionOption("quack_fetch_batch_chunks", "Maximum number of DataChunks returned per FETCH response",
 	                          LogicalType::UBIGINT, Value::UBIGINT(12));
@@ -244,30 +268,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// v0.1 — exposing the HMAC secret to authorized SQL would let any
 	// SQL caller mint cookies. AuthManager generates 32 random bytes
 	// per process at first use; v0.2 reintroduces operator control
-	// via the FLOCK_COOKIE_SIGNING_KEY environment variable.
-	config.AddExtensionOption("flock_auth_cookie_ttl_s",
-	                          "TTL in seconds for HMAC-signed flock_session cookies issued by /auth/login (default 12h)",
+	// via the HARBOR_COOKIE_SIGNING_KEY environment variable.
+	config.AddExtensionOption("harbor_auth_cookie_ttl_s",
+	                          "TTL in seconds for HMAC-signed harbor_session cookies issued by /auth/login (default 12h)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(43200), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("flock_cors_origins",
+	config.AddExtensionOption("harbor_cors_origins",
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("flock_local_dev_mode",
+	config.AddExtensionOption("harbor_local_dev_mode",
 	                          "When true AND bind is loopback: skip token requirement for same-Origin /ddb/* and UI catch-all requests "
-	                          "(uses synthetic principal sha256(\"__FLOCK_LOCAL_DEV__\") for connection-pool keying); off by default",
+	                          "(uses synthetic principal sha256(\"__HARBOR_LOCAL_DEV__\") for connection-pool keying); off by default",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
 
 	// PR-5: /sql endpoint limits per SPEC §6.
-	config.AddExtensionOption("flock_max_sessions",
+	config.AddExtensionOption("harbor_max_sessions",
 	                          "Maximum concurrent DB sessions across all principals; new session creation past "
 	                          "this limit returns 429 SESSION_LIMIT (default 1024)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(1024), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("flock_max_response_rows",
+	config.AddExtensionOption("harbor_max_response_rows",
 	                          "Cap on rows returned per /sql request; 0 = unlimited; truncation reflected in the "
 	                          "NDJSON end record's truncated:true field (default 0)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption(
-	    "flock_max_request_body_bytes",
+	    "harbor_max_request_body_bytes",
 	    "Maximum POST body size for /sql JSON requests; larger requests return 413 PAYLOAD_TOO_LARGE "
 	    "(default 256 MiB; matches the nginx/Caddy reverse-proxy guidance for /quack APPEND payloads)",
 	    LogicalType::UBIGINT, Value::UBIGINT(268435456ULL), nullptr, SetScope::GLOBAL);
@@ -275,8 +299,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
 	// existing duckdb-ui tooling/docs still apply. The local-port
 	// setting from upstream UI is intentionally NOT registered —
-	// flock_serve takes the URI which encodes the port; ui_local_port
-	// would be confusing dead state in flock.
+	// harbor_serve takes the URI which encodes the port; ui_local_port
+	// would be confusing dead state in harbor.
 	{
 		auto def = GetEnvOrDefault(UI_REMOTE_URL_SETTING_NAME, UI_REMOTE_URL_SETTING_DEFAULT);
 		config.AddExtensionOption(UI_REMOTE_URL_SETTING_NAME,
@@ -343,17 +367,17 @@ void QuackExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 std::string QuackExtension::Name() {
-	// flock-specific: the C++ Extension class identity must match the
+	// harbor-specific: the C++ Extension class identity must match the
 	// loadable extension name so DuckDB's introspection / static-registry
 	// bookkeeping doesn't see a mismatch. The class is still spelled
 	// QuackExtension because PR-1 minimizes diff against upstream; only
 	// the reported name changes.
-	return "flock";
+	return "harbor";
 }
 
 std::string QuackExtension::Version() const {
-#ifdef EXT_VERSION_FLOCK
-	return EXT_VERSION_FLOCK;
+#ifdef EXT_VERSION_HARBOR
+	return EXT_VERSION_HARBOR;
 #else
 	return "";
 #endif
@@ -363,7 +387,7 @@ std::string QuackExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(flock, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(harbor, loader) {
 	LoadInternal(loader);
 }
 }

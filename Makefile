@@ -1,7 +1,7 @@
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Configuration of extension
-EXT_NAME=flock
+EXT_NAME=harbor
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 EXT_FLAGS=-DCMAKE_CXX_STANDARD=17
 

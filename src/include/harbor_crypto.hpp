@@ -1,17 +1,17 @@
 #pragma once
 
-// flock_crypto — thin C++ wrapper around OpenSSL libcrypto for the
-// fixed set of primitives flock needs:
+// harbor_crypto — thin C++ wrapper around OpenSSL libcrypto for the
+// fixed set of primitives harbor needs:
 //
 //   - SHA-256 hashing (principal_id derivation, SPEC §6)
-//   - HMAC-SHA256 (flock_session cookie signing, SPEC §7)
+//   - HMAC-SHA256 (harbor_session cookie signing, SPEC §7)
 //   - CSPRNG bytes (cookie signing key, cookie nonces, future session IDs)
 //   - base64url encoding/decoding (cookie segment encoding)
 //   - constant-time byte comparison (HMAC verification)
 //
 // Design rules:
 //   - All primitives are stateless free functions in
-//     duckdb::flock_crypto. No process-static state lives here; the
+//     duckdb::harbor_crypto. No process-static state lives here; the
 //     ephemeral cookie signing key lives on AuthManager.
 //   - RandomBytes / RandomHex throw std::runtime_error if RAND_bytes
 //     fails. RAND_bytes failure is not recoverable from inside this
@@ -32,7 +32,7 @@
 //
 // Threading: every function is reentrant. OpenSSL's EVP_*, HMAC, and
 // RAND_bytes APIs are thread-safe in OpenSSL 1.1.x+ (which is what
-// vcpkg ships and what flock requires).
+// vcpkg ships and what harbor requires).
 
 #include <cstddef>
 #include <cstdint>
@@ -40,7 +40,7 @@
 #include <vector>
 
 namespace duckdb {
-namespace flock_crypto {
+namespace harbor_crypto {
 
 // SHA-256 hex digest (lowercase, 64 chars) of `input`.
 std::string Sha256Hex(const std::string &input);
@@ -85,5 +85,5 @@ std::string PrincipalIdHex(const std::string &client_token);
 // attacker confirm-or-deny a token guess.
 std::string PrincipalAbbrev(const std::string &principal_hex);
 
-} // namespace flock_crypto
+} // namespace harbor_crypto
 } // namespace duckdb
