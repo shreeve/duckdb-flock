@@ -95,6 +95,16 @@ public:
 	// Same contract as upstream QuackServer::ValidateToken.
 	static void ValidateToken(const string &token);
 
+	// PR-6 follow-up (round 19): single source of truth for the
+	// "custom authz configured?" rule. Returns true iff at least one
+	// of harbor_authorization_function / quack_authorization_function
+	// is set to something other than empty AND something other than
+	// the built-in NOP fn names (`harbor_nop_authorization`,
+	// `quack_nop_authorization`). Used by RunAuthorization's centralized
+	// default-deny on __HARBOR_ADMIN__:* AND by harbor_serve's loud
+	// startup WARN when admin-bypass is in effect.
+	static bool IsAdminAuthzCustomConfigured(DatabaseInstance &db);
+
 	// CSPRNG-backed 16-byte (128-bit) token, hex-encoded (32 chars).
 	// Delegates to db.GetEncryptionUtil(), which in DuckDB's default
 	// configuration auto-loads the httpfs extension and uses its

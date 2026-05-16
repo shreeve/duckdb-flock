@@ -121,6 +121,20 @@ code="$(curl -s -o /tmp/harbor-admin-deny.body -w '%{http_code}' -X POST \
 [[ "${code}" == "403" ]] || fail "/sql/cancel expected 403 in default-deny mode (got ${code})"
 pass "default-deny: /checkpoint /interrupt /sql/cancel all return 403"
 
+# Round-19 follow-up: /ready is PUBLIC and must not echo DuckDB error
+# detail in its body. Happy-path is "{ok:true}" only; failure shape is
+# bare "{ok:false}" only. We can't easily simulate a failure, but
+# we can assert the happy-path body is exactly the bare ok envelope.
+READY_BODY="$(curl -s "http://127.0.0.1:${PORT}/ready")"
+[[ "${READY_BODY}" == '{"ok":true}' ]] || fail "/ready ok body must be exactly {ok:true} (got ${READY_BODY})"
+pass "/ready ok body is detail-free"
+
+# Round-19 follow-up: stricter Content-Type rejection. With admin-bypass
+# off we can't invoke the route body, but we CAN exercise the CT check
+# precedence: auth/authz on /interrupt fires first (a 403 result here
+# would mean the CT check ran AFTER auth which is fine; we just need
+# both 415-paths covered in the bypass-mode block below).
+
 # Wrong/missing token still 401 (not 403) — auth precedes authz.
 code="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer wrong-token" "http://127.0.0.1:${PORT}/whoami")"
@@ -229,6 +243,17 @@ pass "/checkpoint returns 200 (success) or 409 CONFLICT (transactions in flight)
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT2}/interrupt" -d '{}')"
 [[ "${code}" == "415" ]] || fail "/interrupt without CT expected 415 (got ${code})"
+# Round-19 follow-up: stricter Content-Type — `application/jsonjunk` was
+# previously accepted by the prefix-only check.
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/jsonjunk' \
+    "http://127.0.0.1:${PORT2}/interrupt" -d '{"sessionId":"x"}')"
+[[ "${code}" == "415" ]] || fail "/interrupt with bogus CT 'application/jsonjunk' expected 415 (got ${code})"
+# But the canonical charset suffix must still pass.
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json; charset=utf-8' \
+    "http://127.0.0.1:${PORT2}/interrupt" -d '{"sessionId":"deadbeef"}')"
+[[ "${code}" == "404" ]] || fail "/interrupt with 'application/json; charset=utf-8' expected to pass CT check (got ${code})"
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
     "http://127.0.0.1:${PORT2}/interrupt" -d '{}')"
@@ -237,7 +262,7 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
     "http://127.0.0.1:${PORT2}/interrupt" -d '{"sessionId":"deadbeef"}')"
 [[ "${code}" == "404" ]] || fail "/interrupt unknown sid expected 404 (got ${code})"
-pass "/interrupt: 415 (no CT), 400 (no sid), 404 (unknown sid)"
+pass "/interrupt: 415 (no CT or junk CT), pass with charset suffix, 400 (no sid), 404 (unknown sid)"
 
 # Body-limit: harbor_max_request_body_bytes=512; 600-byte body → 413.
 BIG="$(printf 'x%.0s' $(seq 1 600))"
@@ -377,5 +402,88 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
     "http://127.0.0.1:${PORT3}/checkpoint" -d '{}')"
 [[ "${code}" == "403" ]] || fail "custom authz: /checkpoint should be denied (got ${code})"
 pass "custom authz fn: per-resource gating (server/sessions allowed; catalog/checkpoint denied)"
+
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+
+# Phase 4 (round-19 follow-up) — explicit-NOP-authz still admin-denies.
+# This is the security fix round 19 caught: a Quack user reasonably
+# setting `quack_authorization_function='quack_nop_authorization'` (the
+# documented Quack default) should NOT thereby gain admin access. Same
+# rule for `harbor_authorization_function` set to `harbor_nop_authorization`.
+PORT4="$((PORT + 3))"
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+-- harbor_allow_admin_without_authz NOT set
+SET GLOBAL quack_authorization_function='quack_nop_authorization';
+CALL harbor_serve('quack:127.0.0.1:${PORT4}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT4}/info" || fail "phase-4 server did not start"
+pass "server started (explicit nop-authz mode — round 19 follow-up)"
+
+# /whoami /tables /sessions /checkpoint /interrupt /sql/cancel must
+# all still default-deny — explicit nop must NOT count as "custom".
+for path in /whoami /tables /sessions; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT4}${path}")"
+    [[ "${code}" == "403" ]] || \
+        fail "explicit-nop authz: ${path} expected 403 (got ${code}) — round-19 fail-open regression"
+done
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+    "http://127.0.0.1:${PORT4}/checkpoint" -d '{}')"
+[[ "${code}" == "403" ]] || \
+    fail "explicit-nop authz: /checkpoint expected 403 (got ${code}) — round-19 fail-open regression"
+pass "explicit nop-authz fn (quack_nop_authorization) does NOT count as custom — admin still default-denied"
+
+# Same check with harbor_authorization_function explicitly set to
+# the harbor-side nop name. Test case-insensitivity at the same time.
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+PORT5="$((PORT + 4))"
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+SET GLOBAL harbor_authorization_function='Harbor_NOP_Authorization';
+CALL harbor_serve('quack:127.0.0.1:${PORT5}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT5}/info" || fail "phase-5 server did not start"
+code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT5}/whoami")"
+[[ "${code}" == "403" ]] || \
+    fail "explicit case-mixed nop authz: /whoami expected 403 (got ${code})"
+pass "explicit nop-authz fn case-insensitive — Harbor_NOP_Authorization still triggers admin default-deny"
+
+# Round-20 polish: schema-qualified nop fn name must also be recognized.
+# Without IsBuiltinNopAuthz's rfind('.')+substr step, `main.harbor_nop_authorization`
+# would slip through and re-open the round-19 fail-open.
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+PORT6="$((PORT + 5))"
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+SET GLOBAL harbor_authorization_function='main.harbor_nop_authorization';
+CALL harbor_serve('quack:127.0.0.1:${PORT6}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT6}/info" || fail "phase-6 server did not start"
+code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT6}/whoami")"
+[[ "${code}" == "403" ]] || \
+    fail "schema-qualified nop authz: /whoami expected 403 (got ${code}) — round-20 schema-strip regression"
+pass "schema-qualified nop-authz fn (main.harbor_nop_authorization) still triggers admin default-deny"
 
 green "All admin-roundtrip golden assertions passed."

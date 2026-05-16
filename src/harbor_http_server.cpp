@@ -159,13 +159,6 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 		// = true is the explicit opt-in for 'I really do want
 		// unrestricted admin access on this trusted-network
 		// deployment.' Logged loudly at server start."
-		auto setting_string_or = [&](const char *name) -> string {
-			Value v;
-			if (config.TryGetCurrentSetting(name, v) && !v.IsNull() && v.type().id() == LogicalTypeId::VARCHAR) {
-				return v.GetValue<string>();
-			}
-			return string();
-		};
 		auto setting_bool_or = [&](const char *name, bool fallback) -> bool {
 			Value v;
 			if (config.TryGetCurrentSetting(name, v) && !v.IsNull() && v.type().id() == LogicalTypeId::BOOLEAN) {
@@ -173,8 +166,12 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 			}
 			return fallback;
 		};
-		bool custom_authz_configured = !setting_string_or("harbor_authorization_function").empty() ||
-		                               !setting_string_or("quack_authorization_function").empty();
+		// PR-6 follow-up (round 19): use the single-source-of-truth
+		// "is admin authz custom configured?" rule from AuthManager.
+		// The previous inline check counted any non-empty setting as
+		// "custom"; that fails open when an operator explicitly sets
+		// the setting to a built-in NOP function name (round-19 catch).
+		bool custom_authz_configured = AuthManager::IsAdminAuthzCustomConfigured(*db_locked);
 		bool allow_admin_without_authz = setting_bool_or("harbor_allow_admin_without_authz", false);
 		if (allow_admin_without_authz && !custom_authz_configured) {
 			auto &logger = Logger::Get(*db_locked);
