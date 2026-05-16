@@ -4,8 +4,8 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-15 23:55 MDT
-**Last fully merged `main`:** `16617ba` — PR-6: admin handlers + /sql/cancel + __HARBOR_ADMIN__ default-deny (#13)
+**Last updated:** 2026-05-16 00:30 MDT
+**Last fully merged `main`:** `433692e` — PR-6 follow-up: post-merge review (rounds 19+20) — security + correctness fixes (#14)
 **Active branch:** none yet — PR-7 (hardening) is the next planned PR; branch `pr7-hardening` will be created off `main` when work begins.
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
@@ -47,6 +47,7 @@ Latest merged chain:
 | PR-5 | merged | JSON `/sql` endpoint, NDJSON streaming, principal-owned sessions, golden tests. |
 | PR-12 | merged | Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Build identity, source tree, SQL surface, HTTP cookie/headers, env vars, scripts, and docs all moved to `harbor`. Quack wire compat preserved. |
 | PR-6 | merged | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`). Centralized `__HARBOR_ADMIN__:` default-deny in `AuthManager::RunAuthorization` (detected by setting presence — robust against aliased fn names) with `harbor_allow_admin_without_authz` operator opt-in. `HarborSession` instrumented (`created_at`/`last_query`/`query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. New `golden-admin-roundtrip.sh` (26 assertions across three lifecycles: default-deny, admin-bypass, custom authz fn). |
+| PR-6.1 (#14) | merged | Post-merge security + correctness follow-up surfaced by GPT-5.5 round 19 and signed off in round 20. Fixed: (a) **default-deny fail-open** when operator explicitly set `harbor_authorization_function` / `quack_authorization_function` to a built-in nop name (security); the `IsBuiltinNopAuthz` normalizer now lower-cases, strips whitespace, and strips a leading schema-qualifier prefix before comparison. (b) **RNG TOCTOU** in `SessionManager::GenerateSessionId` (correctness; lock now held across init + `GenerateRandomData`). (c) **`/ready` info leak** — bare `{"ok":false}` 503 with no DuckDB error detail. (d) Tighter `Content-Type: application/json` parser (rejects `application/jsonjunk`; only `;` is the standard MIME parameter separator). (e) `/checkpoint` body validation now fires on chunked transfer encoding too. Golden coverage extended (26 → 31 assertions) with regression guards for explicit-nop, mixed-case-nop, schema-qualified-nop, and the tighter Content-Type. |
 
 All merged PRs were green on every CI check at merge time. The current
 CI matrix runs five build targets (Linux `linux_amd64`, MacOS
@@ -94,7 +95,7 @@ hardening:
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb` — should show `main` clean and at `16617ba` or later.
+2. `git status -sb` — should show `main` clean and at `433692e` or later.
 3. Branch off `main` for the next PR:
    ```bash
    git switch main
@@ -107,6 +108,6 @@ hardening:
    make test_release                  # 44/44
    scripts/golden-cookie-auth.sh      # 14/14
    scripts/golden-sql-roundtrip.sh    # 19/19
-   scripts/golden-admin-roundtrip.sh  # 26/26
+   scripts/golden-admin-roundtrip.sh  # 31/31
    ```
 5. Confirm all green before starting new work.
