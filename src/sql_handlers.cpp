@@ -300,18 +300,32 @@ struct StreamingCtx {
 	// manual ~StreamingCtx body that only flipped query_in_flight.
 	unique_ptr<QueryExecutionGuard> session_guard;
 	unique_ptr<QueryTimeoutWatchdog> ephemeral_watchdog;
-	// True iff EITHER the session_guard reports timed-out OR the
-	// ephemeral_watchdog reports timed-out. Used by the streaming
-	// provider's catch path to surface QUERY_TIMEOUT in the mid-stream
-	// NDJSON error line vs a generic SQL error.
-	bool TimedOut() const {
-		if (session_guard && session_guard->TimedOut()) {
-			return true;
+	// PR-7b — return the actual interrupt cause that fired (if any),
+	// so the streaming provider's catch + empty-chunk paths can
+	// classify QUERY_TIMEOUT vs QUERY_CANCELLED vs natural end.
+	// Round 22 (GPT-5.5): the prior bool TimedOut() was insufficient
+	// — DuckDB's StreamingQueryResult returns empty (not an exception)
+	// on Interrupt regardless of WHO fired it. With only TimedOut()
+	// the empty-chunk branch would emit `{"type":"end"}` for a
+	// USER_CANCEL'd stream, falsely indicating success.
+	//
+	// Sessionful path: session_guard knows TIMEOUT (from
+	// timed_out_generation) and USER_CANCEL/DISCONNECT (from
+	// interrupt_cause atomic).
+	// Ephemeral path: only TIMEOUT applies (USER_CANCEL targets a
+	// sessionId via SessionManager which ephemerals are not in;
+	// DISCONNECT path doesn't call Interrupt() in v0.1).
+	InterruptCause Cause() const {
+		if (session_guard) {
+			return session_guard->Cause();
 		}
 		if (ephemeral_watchdog && ephemeral_watchdog->TimedOut()) {
-			return true;
+			return InterruptCause::TIMEOUT;
 		}
-		return false;
+		return InterruptCause::NONE;
+	}
+	bool TimedOut() const {
+		return Cause() == InterruptCause::TIMEOUT;
 	}
 };
 
@@ -745,31 +759,55 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 				// Mid-stream error: emit error line directly in the
 				// catch (round-15 GPT-5.5: don't rely on httplib
 				// calling us back after returning true).
-				// PR-7b — if the timeout sweeper / watchdog interrupted
-				// THIS query (vs a user-issued /sql/cancel or generic
-				// SQL exception), surface the dedicated QUERY_TIMEOUT
-				// errorCode so clients can distinguish.
-				if (ctx->TimedOut()) {
+				// PR-7b (round 22) — classify by interrupt cause so
+				// QUERY_TIMEOUT, QUERY_CANCELLED, and generic SQL
+				// errors are distinguishable to the client. Cause()
+				// returns NONE when no interrupt fired (generic
+				// SQL exception path).
+				auto cause = ctx->Cause();
+				if (cause == InterruptCause::TIMEOUT) {
 					EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
 					                        "query exceeded harbor_query_timeout_s");
+					return false;
+				}
+				if (cause == InterruptCause::USER_CANCEL) {
+					EmitStreamingErrorSafe(*ctx, sink, "QUERY_CANCELLED",
+					                        "query was cancelled by /sql/cancel or /interrupt");
 					return false;
 				}
 				EmitStreamingErrorSafe(*ctx, sink, ClassifyError(ex.what()), ex.what());
 				return false;
 			}
 			if (!chunk || chunk->size() == 0) {
-				// PR-7b — DuckDB's StreamingQueryResult returns
-				// empty (not an exception) when Connection::Interrupt
-				// fires mid-stream. So an empty chunk could mean
-				// either (a) genuine end of result OR (b) the
-				// sweeper / watchdog interrupted us. Check TimedOut()
-				// first; if true, classify the empty as a timeout
-				// rather than a natural end — otherwise the client
-				// sees `{"type":"end"}` after a partial result and
-				// thinks the query succeeded with fewer rows.
-				if (ctx->TimedOut()) {
+				// PR-7b (round 22 fix) — DuckDB's
+				// StreamingQueryResult returns empty (not an
+				// exception) when Connection::Interrupt fires
+				// mid-stream, regardless of WHO fired it. So an
+				// empty chunk could mean (a) genuine end of result,
+				// (b) timeout sweeper / watchdog interrupted, OR
+				// (c) /sql/cancel + /interrupt user-cancellation.
+				// Without classifying these distinctly, an
+				// interrupted stream would emit `{"type":"end"}` and
+				// the client would think the query succeeded with
+				// fewer rows — exactly the round-22 GPT-5.5 catch.
+				auto cause = ctx->Cause();
+				if (cause == InterruptCause::TIMEOUT) {
 					EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
 					                        "query exceeded harbor_query_timeout_s");
+					return false;
+				}
+				if (cause == InterruptCause::USER_CANCEL) {
+					EmitStreamingErrorSafe(*ctx, sink, "QUERY_CANCELLED",
+					                        "query was cancelled by /sql/cancel or /interrupt");
+					return false;
+				}
+				if (cause == InterruptCause::DISCONNECT) {
+					// Client gone; close cleanly without an error
+					// frame the caller wouldn't read anyway. Today
+					// the DISCONNECT path doesn't actually call
+					// Interrupt(), so this branch is forward-
+					// compatible groundwork for the post-v0.1 wiring.
+					sink.done();
 					return false;
 				}
 				// End of result.
@@ -835,12 +873,19 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 			// addition to result->Fetch() failures. Round-16 catch:
 			// the fetch-only catch above was insufficient because
 			// EmitRow/EmitChunk can throw after a chunk is fetched.
-			// PR-7b — same QUERY_TIMEOUT classification as the inner
-			// fetch catch above, in case the timeout interrupts the
-			// encoder mid-row rather than mid-fetch.
-			if (ctx->TimedOut()) {
+			// PR-7b (round 22) — classify by interrupt cause as in
+			// the inner catch above: QUERY_TIMEOUT, QUERY_CANCELLED,
+			// or fall through to ClassifyError for non-interrupt
+			// exceptions (encoder bugs, etc.).
+			auto cause = ctx->Cause();
+			if (cause == InterruptCause::TIMEOUT) {
 				EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
 				                        "query exceeded harbor_query_timeout_s");
+				return false;
+			}
+			if (cause == InterruptCause::USER_CANCEL) {
+				EmitStreamingErrorSafe(*ctx, sink, "QUERY_CANCELLED",
+				                        "query was cancelled by /sql/cancel or /interrupt");
 				return false;
 			}
 			EmitStreamingErrorSafe(*ctx, sink, ClassifyError(ex.what()), ex.what());

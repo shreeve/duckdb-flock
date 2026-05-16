@@ -227,6 +227,97 @@ echo "${RESP}" | grep -q '"errorCode":"QUERY_TIMEOUT"' \
     && fail "generation-race REGRESSION: fast query on post-timeout session got stale QUERY_TIMEOUT"
 pass "generation-race guard: fast query on post-timeout session completes (no stale sweeper interrupt)"
 
+# PR-7b round-22 regression guard: USER_CANCEL on a streaming sessionful
+# query must emit `{"type":"error","code":"QUERY_CANCELLED"}` mid-stream,
+# NOT `{"type":"end"}`. Without the round-22 fix, DuckDB's
+# StreamingQueryResult returning empty on Interrupt would have caused
+# the streaming provider to emit a fake successful end after a
+# user-cancelled stream — exactly the falsely-truncated-result bug.
+#
+# Strategy: run a SLOW streaming query in the background, give it ~500ms
+# to start streaming, then issue /sql/cancel against its session. Read
+# the response body. Expect QUERY_CANCELLED somewhere in the output.
+SESS2="$(curl -sf -X POST "http://127.0.0.1:${PORT2}/sql/sessions/new" \
+    -H "Authorization: Bearer ${TOKEN}" -d '')"
+SID2="$(echo "${SESS2}" | sed -E 's/.*"sessionId":"([^"]+)".*/\1/')"
+[[ -n "${SID2}" && "${SID2}" != "${SESS2}" ]] || fail "/sql/sessions/new failed: ${SESS2}"
+
+# The slow streaming query in a background curl. Use a higher timeout
+# value so the timeout sweeper doesn't fire before we can /sql/cancel.
+# We'll temporarily raise harbor_query_timeout_s for THIS test only via
+# a third server lifecycle (cleaner than mutating mid-test).
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+PORT3="$((PORT + 2))"
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+SET GLOBAL harbor_query_timeout_s=30;
+SET GLOBAL harbor_allow_admin_without_authz=true;
+CALL harbor_serve('quack:127.0.0.1:${PORT3}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT3}/info" || fail "phase-3 server did not start"
+
+SESS3="$(curl -sf -X POST "http://127.0.0.1:${PORT3}/sql/sessions/new" \
+    -H "Authorization: Bearer ${TOKEN}" -d '')"
+SID3="$(echo "${SESS3}" | sed -E 's/.*"sessionId":"([^"]+)".*/\1/')"
+[[ -n "${SID3}" && "${SID3}" != "${SESS3}" ]] || fail "phase-3 session create failed"
+
+# Background streaming query.
+( curl -s --max-time 30 -X POST "http://127.0.0.1:${PORT3}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/x-ndjson' \
+    -d "{\"sql\":\"${SLOW_QUERY_STREAM}\",\"sessionId\":\"${SID3}\"}" \
+    > /tmp/harbor-timeout-cancel.ndjson 2>&1 ) &
+STREAM_PID=$!
+
+# Give the streaming query ~500ms to start emitting before we cancel.
+sleep 0.5
+
+# Issue /sql/cancel.
+CANCEL_RESP="$(curl -s --max-time 5 -X POST "http://127.0.0.1:${PORT3}/sql/cancel" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"sessionId\":\"${SID3}\"}")"
+echo "${CANCEL_RESP}" | grep -q '"ok":true' \
+    || fail "/sql/cancel did not return ok:true: ${CANCEL_RESP}"
+
+# Wait for the background stream to finish so we can inspect its output.
+wait "${STREAM_PID}" 2>/dev/null || true
+
+# The streamed response MUST contain QUERY_CANCELLED, NOT a final
+# `{"type":"end"}` indicating success.
+grep -q '"type":"error"' /tmp/harbor-timeout-cancel.ndjson \
+    || fail "round-22 regression: streaming /sql/cancel did not emit error line; body: $(cat /tmp/harbor-timeout-cancel.ndjson | tail -3)"
+grep -q '"code":"QUERY_CANCELLED"' /tmp/harbor-timeout-cancel.ndjson \
+    || fail "round-22 regression: streaming /sql/cancel did not emit QUERY_CANCELLED code; body: $(cat /tmp/harbor-timeout-cancel.ndjson | tail -3)"
+# Sanity: should NOT have emitted natural end record after the cancel.
+LAST_LINE="$(tail -1 /tmp/harbor-timeout-cancel.ndjson)"
+echo "${LAST_LINE}" | grep -q '"type":"end"' \
+    && fail "round-22 regression: cancelled stream emitted fake natural end as last line"
+pass "round-22 regression: streaming USER_CANCEL emits QUERY_CANCELLED, not fake natural end"
+
+# Restart the timeout=1s server for the remaining tests.
+kill "${SERVER_PID}" 2>/dev/null || true
+wait "${SERVER_PID}" 2>/dev/null || true
+SERVER_PID=""
+sleep 1
+nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
+LOAD '${EXT_PATH}';
+SET GLOBAL harbor_query_timeout_s=1;
+SET GLOBAL harbor_allow_admin_without_authz=true;
+CALL harbor_serve('quack:127.0.0.1:${PORT2}', token := '${TOKEN}');
+CALL harbor_wait();
+" > "${SERVER_LOG}" 2>&1 &
+SERVER_PID=$!
+sleep 2
+curl -sf -o /dev/null "http://127.0.0.1:${PORT2}/info" || fail "phase-2-restart did not start"
+
 # Admin /checkpoint: should NOT time out on an empty in-memory DB
 # (CHECKPOINT is fast). Verify the watchdog construction doesn't
 # accidentally fire on a fast operation. This is the negative-control
