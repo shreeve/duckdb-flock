@@ -196,9 +196,47 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	if (!db_locked) {
 		return false;
 	}
-	auto fn_name = GetSettingString(*db_locked, "harbor_authorization_function");
+
+	// Resolve the authz function name in Harbor-primary / Quack-compat order.
+	auto harbor_fn = GetSettingString(*db_locked, "harbor_authorization_function");
+	auto quack_fn = GetSettingString(*db_locked, "quack_authorization_function");
+
+	// PR-6 — centralized default-deny on __HARBOR_ADMIN__:* synthetic
+	// admin strings when no custom hook is configured. Per SPEC §7:
+	// "Admin authorization is default-deny when no hook is configured."
+	//
+	// Detection rule (per round-18 review with GPT-5.5): "custom authz
+	// configured?" is decided by SETTING PRESENCE — both
+	// harbor_authorization_function and quack_authorization_function
+	// being empty means we'd be falling through to the built-in
+	// harbor_nop_authorization. We do NOT string-compare the resolved
+	// fn name to the literal "harbor_nop_authorization" because operator
+	// configs can schema-qualify, alias, or case-shift function names
+	// in ways that would silently bypass the default-deny invariant.
+	//
+	// Operators who genuinely want unrestricted admin access on a
+	// trusted-network deployment flip harbor_allow_admin_without_authz=true.
+	// harbor_serve emits a loud WARN log when the combination is in effect.
+	const bool custom_authz_configured = !harbor_fn.empty() || !quack_fn.empty();
+	const bool is_admin_query = StringUtil::StartsWith(query, "__HARBOR_ADMIN__:");
+	if (is_admin_query && !custom_authz_configured) {
+		bool allow_admin_without_authz = false;
+		Value allow_setting;
+		auto &config = DBConfig::GetConfig(*db_locked);
+		if (config.TryGetCurrentSetting("harbor_allow_admin_without_authz", allow_setting) &&
+		    !allow_setting.IsNull() && allow_setting.type().id() == LogicalTypeId::BOOLEAN) {
+			allow_admin_without_authz = allow_setting.GetValue<bool>();
+		}
+		if (!allow_admin_without_authz) {
+			return false;
+		}
+		// Falls through to harbor_nop_authorization, which always
+		// returns true. This is the explicit operator opt-in path.
+	}
+
+	auto fn_name = harbor_fn;
 	if (fn_name.empty()) {
-		fn_name = GetSettingString(*db_locked, "quack_authorization_function");
+		fn_name = quack_fn;
 	}
 	if (fn_name.empty()) {
 		fn_name = "harbor_nop_authorization";

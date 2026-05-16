@@ -430,6 +430,27 @@ void AuthHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	                                                   duckdb_httplib_openssl::Response &res) {
 		self->HandlePreflight(req, res);
 	});
+
+	// PR-6 — admin route preflights. /checkpoint, /interrupt, /sql/cancel
+	// are all mutating POSTs; without these, browser-origin admin tools
+	// would be blocked at the preflight stage even with a valid Origin
+	// in harbor_cors_origins. /sessions, /tables, /whoami, /schema, and
+	// /ready are GETs — modern browsers don't preflight simple GETs, so
+	// we skip OPTIONS for them; if a tool sends a non-simple GET (e.g.
+	// custom header) the preflight will 404 cleanly, which the tool
+	// must handle by retrying without the custom header.
+	http.Options("/checkpoint", [self](const duckdb_httplib_openssl::Request &req,
+	                                    duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
+	http.Options("/interrupt", [self](const duckdb_httplib_openssl::Request &req,
+	                                   duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
+	http.Options("/sql/cancel", [self](const duckdb_httplib_openssl::Request &req,
+	                                    duckdb_httplib_openssl::Response &res) {
+		self->HandlePreflight(req, res);
+	});
 }
 
 } // namespace duckdb

@@ -78,6 +78,19 @@ bool MessageRequiresConnection(MessageType type) {
 	}
 }
 
+// PR-6 — RAII helper that pairs query_in_flight set-true with a
+// guaranteed set-false when the case body exits (success, exception,
+// or early return-make_uniq<ErrorResponse>(...)). Caller must already
+// hold session->lock; last_query is mutated under that lock.
+struct QuackInFlightGuard {
+	HarborSession *session = nullptr;
+	~QuackInFlightGuard() {
+		if (session) {
+			session->query_in_flight.store(false, std::memory_order_release);
+		}
+	}
+};
+
 string ExtractQuery(QuackMessage &msg) {
 	if (msg.Type() == MessageType::PREPARE_REQUEST) {
 		return msg.Cast<PrepareRequestMessage>().Query();
@@ -193,6 +206,12 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 		std::unique_lock<std::mutex> lock(s.lock);
 		s.duckdb_query_result.reset();
 
+		// PR-6 — record last_query + flip query_in_flight=true for /sessions
+		// visibility. Reset on case-body exit via QuackInFlightGuard.
+		s.last_query = prepare_request_message.Query();
+		s.query_in_flight.store(true, std::memory_order_release);
+		QuackInFlightGuard prepare_in_flight {&s};
+
 		{
 			auto query_result = s.duckdb_connection->SendQuery(prepare_request_message.Query());
 			if (query_result->HasError()) {
@@ -228,6 +247,13 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 		auto &fetch_request_message = received_message.Cast<FetchRequestMessage>();
 		auto &s = *session;
 		std::unique_lock<std::mutex> lock(s.lock);
+
+		// PR-6 — last_query is already set from the preceding PREPARE
+		// of this result_uuid. Flip in_flight while CreateBatch loops
+		// against the streamed result. RAII ensures it goes back to
+		// false on every return path.
+		s.query_in_flight.store(true, std::memory_order_release);
+		QuackInFlightGuard fetch_in_flight {&s};
 
 		if (s.result_uuid != fetch_request_message.uuid) {
 			return make_uniq<ErrorResponse>("Result has been closed");
@@ -270,6 +296,15 @@ unique_ptr<QuackMessage> QuackHandlers::HandleMessageInternal(DatabaseInstance &
 		}
 
 		std::unique_lock<std::mutex> lock(s.lock);
+
+		// PR-6 — instrumentation for /sessions visibility. Use the
+		// synthesized dummy_insert_query for last_query so admins see
+		// "INSERT INTO foo.bar VALUES (NULL)" rather than nothing — the
+		// actual append's row count isn't a single SQL string anyway.
+		s.last_query = dummy_insert_query;
+		s.query_in_flight.store(true, std::memory_order_release);
+		QuackInFlightGuard append_in_flight {&s};
+
 		auto &context = *s.duckdb_connection->context;
 		auto table_info = context.TableInfo(append_request_message.SchemaName(), append_request_message.TableName());
 		if (!table_info) {
