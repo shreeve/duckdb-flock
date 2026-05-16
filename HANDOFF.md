@@ -4,9 +4,9 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-16 00:30 MDT
-**Last fully merged `main`:** `433692e` — PR-6 follow-up: post-merge review (rounds 19+20) — security + correctness fixes (#14)
-**Active branch:** `pr7a-full-ci-matrix` (CI-matrix flip; first of the PR-7-series hardening PRs).
+**Last updated:** 2026-05-16 03:40 MDT
+**Last fully merged `main`:** `96192e0` — PR-7a: flip CI matrix from reduced (5 platforms) to full (9 build targets) (#15)
+**Active branch:** none yet — PR-7b (`harbor_query_timeout_s` runtime enforcement) is the next planned PR; branch will be created off `main` when work begins.
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -48,6 +48,7 @@ Latest merged chain:
 | PR-12 | merged | Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Build identity, source tree, SQL surface, HTTP cookie/headers, env vars, scripts, and docs all moved to `harbor`. Quack wire compat preserved. |
 | PR-6 | merged | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`). Centralized `__HARBOR_ADMIN__:` default-deny in `AuthManager::RunAuthorization` (detected by setting presence — robust against aliased fn names) with `harbor_allow_admin_without_authz` operator opt-in. `HarborSession` instrumented (`created_at`/`last_query`/`query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. New `golden-admin-roundtrip.sh` (26 assertions across three lifecycles: default-deny, admin-bypass, custom authz fn). |
 | PR-6.1 (#14) | merged | Post-merge security + correctness follow-up surfaced by GPT-5.5 round 19 and signed off in round 20. Fixed: (a) **default-deny fail-open** when operator explicitly set `harbor_authorization_function` / `quack_authorization_function` to a built-in nop name (security); the `IsBuiltinNopAuthz` normalizer now lower-cases, strips whitespace, and strips a leading schema-qualifier prefix before comparison. (b) **RNG TOCTOU** in `SessionManager::GenerateSessionId` (correctness; lock now held across init + `GenerateRandomData`). (c) **`/ready` info leak** — bare `{"ok":false}` 503 with no DuckDB error detail. (d) Tighter `Content-Type: application/json` parser (rejects `application/jsonjunk`; only `;` is the standard MIME parameter separator). (e) `/checkpoint` body validation now fires on chunked transfer encoding too. Golden coverage extended (26 → 31 assertions) with regression guards for explicit-nop, mixed-case-nop, schema-qualified-nop, and the tighter Content-Type. |
+| PR-7a (#15) | merged | Flipped `reduced_ci_mode: 'enabled'` → `'disabled'` so every PR runs against the full upstream non-opt-in matrix BEFORE merging. Matrix went from 5 to 9 build targets per push: Linux (amd64 + arm64), MacOS (amd64 + arm64), Windows (amd64 + amd64_mingw), Wasm (mvp + eh + threads). All four new platforms (`linux_arm64`, `osx_amd64`, `wasm_eh`, `wasm_threads`) passed on first try with zero source changes. First of the PR-7-series focused hardening PRs (split from the original "PR-7 omnibus" so each concern is reviewable independently). |
 
 All merged PRs were green on every CI check at merge time. With
 PR-7a's flip of `reduced_ci_mode: 'enabled'` → `'disabled'`, the
@@ -63,24 +64,29 @@ Plus the matrix-generation step plus the `architecture-guard`
 rows per push. The `*_musl` and `windows_arm64` targets remain
 opt-in only.
 
-## Up next: PR-7 (hardening)
+## Up next: PR-7-series (hardening, split into focused PRs)
 
-Per `AGENTS.md` Implementation roadmap, the remaining v0.1 work is
-hardening:
+The original "PR-7 omnibus" was split into focused PRs so each concern
+is reviewable independently. PR-7a (CI matrix flip) is merged; the
+remaining items in dependency order:
 
-- ~~Flip `reduced_ci_mode: 'enabled'` off~~ — landing in PR-7a
-  (active branch `pr7a-full-ci-matrix`).
-- `harbor_query_timeout_s` runtime enforcement (setting is in SPEC,
-  but the executor-side interrupt-after-N-seconds wiring is PR-7).
-- Default-deny on unknown `Authorization:` schemes (today
+- ~~PR-7a: flip `reduced_ci_mode: 'enabled'` off~~ — **merged** as `96192e0`.
+- **PR-7b (next): `harbor_query_timeout_s` runtime enforcement** — the
+  setting is already in SPEC and registered, but the executor-side
+  interrupt-after-N-seconds wiring is PR-7b.
+- **PR-7c**: Default-deny on unknown `Authorization:` schemes (today
   `Authorization: Basic …` falls through to cookie/X-Harbor-Token; should
-  explicitly reject anything that isn't `Bearer`).
-- Login-page CSP + nonce.
-- Full nested-type param parser for `/sql` Mode B wrappers
-  (`LIST<...>`, `STRUCT(...)`, etc.).
-- More golden tests: per-DuckDB-type `/sql` round-trip in
-  `test/types/`; full byte-level Quack/UI fixtures in `test/golden/`.
-- Distribution: DuckDB community-extensions repo submission.
+  explicitly reject anything that isn't `Bearer`) + login-page CSP + nonce.
+- **PR-7d**: Full nested-type Mode B param parser for `/sql`
+  (`LIST<...>`, `STRUCT(...)`, `MAP<...>`).
+- **PR-7e**: More golden tests — per-DuckDB-type `/sql` round-trip
+  in `test/types/`; byte-level Quack/UI fixtures in `test/golden/`.
+- **PR-7f**: Community-extensions repo submission (last; depends on
+  everything else green).
+
+Each gets its own GPT-5.5 design review (R-N pre-coding) → impl →
+post-impl review (R-N+1) → sign-off (R-N+2) — matching the pattern
+that worked for PR-5 and PR-6.
 
 ## Design decisions / caveats to preserve
 
@@ -100,12 +106,12 @@ hardening:
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb` — should show `main` clean and at `433692e` or later.
+2. `git status -sb` — should show `main` clean and at `96192e0` or later.
 3. Branch off `main` for the next PR:
    ```bash
    git switch main
    git pull --ff-only
-   git switch -c pr7-hardening
+   git switch -c pr7b-query-timeout
    ```
 4. Run a fresh sanity build:
    ```bash
