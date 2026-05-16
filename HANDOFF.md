@@ -4,9 +4,9 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-15 22:30 MDT
-**Last fully merged `main`:** `a03fbc9` — PR-12: rename duckdb-flock to duckdb-harbor (#12)
-**Active branch:** `pr6-admin-handlers` (about to open as PR)
+**Last updated:** 2026-05-15 23:55 MDT
+**Last fully merged `main`:** `16617ba` — PR-6: admin handlers + /sql/cancel + __HARBOR_ADMIN__ default-deny (#13)
+**Active branch:** none yet — PR-7 (hardening) is the next planned PR; branch `pr7-hardening` will be created off `main` when work begins.
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -20,11 +20,10 @@ multi-protocol HTTP service on one port:
   merged, cookie-gated, credential-strip tested.
 - JSON SQL (`POST /sql`) — merged with NDJSON streaming, principal-owned
   sessions, golden-tested.
-- **Admin endpoints (PR-6, in flight as `pr6-admin-handlers`)** — `/ready`,
-  `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`,
-  `/interrupt`, `/sql/cancel`. `__HARBOR_ADMIN__:resource:action` authz
-  with centralized default-deny and `harbor_allow_admin_without_authz`
-  operator opt-in. 26-assertion HTTP golden test.
+- Admin endpoints (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`,
+  `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`) — merged
+  with centralized `__HARBOR_ADMIN__:` default-deny and
+  `harbor_allow_admin_without_authz` operator opt-in.
 
 Architecture is `httplib + OpenSSL` for v0.1. The PR-10b migration to
 mbedTLS/HTTPUtil/plain-httplib was evaluated and declined; do not
@@ -47,6 +46,7 @@ Latest merged chain:
 | PR-11 | merged | Docs: cancelled PR-10b migration; strengthened why `curl` is required. |
 | PR-5 | merged | JSON `/sql` endpoint, NDJSON streaming, principal-owned sessions, golden tests. |
 | PR-12 | merged | Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Build identity, source tree, SQL surface, HTTP cookie/headers, env vars, scripts, and docs all moved to `harbor`. Quack wire compat preserved. |
+| PR-6 | merged | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`). Centralized `__HARBOR_ADMIN__:` default-deny in `AuthManager::RunAuthorization` (detected by setting presence — robust against aliased fn names) with `harbor_allow_admin_without_authz` operator opt-in. `HarborSession` instrumented (`created_at`/`last_query`/`query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. New `golden-admin-roundtrip.sh` (26 assertions across three lifecycles: default-deny, admin-bypass, custom authz fn). |
 
 All merged PRs were green on every CI check at merge time. The current
 CI matrix runs five build targets (Linux `linux_amd64`, MacOS
@@ -54,63 +54,13 @@ CI matrix runs five build targets (Linux `linux_amd64`, MacOS
 DuckDB-Wasm `wasm_mvp`) plus a matrix-generation step plus the
 `architecture-guard` (single `duckdb_httplib::Server` owner) check
 — seven total checks per push. `osx_amd64` and `linux_arm64` are
-intentionally excluded by `reduced_ci_mode: enabled`; PR-7+ revisits
+intentionally excluded by `reduced_ci_mode: enabled`; PR-7 revisits
 the full matrix.
 
-## Active work: PR-6 (admin handlers)
+## Up next: PR-7 (hardening)
 
-Branch `pr6-admin-handlers`. Implementation, instrumentation, and tests
-are all complete locally; ready to open the PR.
-
-Routes added (registered before UiHandlers' `GET /.*` catch-all):
-
-- `GET /ready` (public probe; runs `SELECT 1`)
-- `GET /whoami` (authz `__HARBOR_ADMIN__:server:whoami`)
-- `GET /tables` (authz `__HARBOR_ADMIN__:catalog:list_tables`)
-- `GET /schema/:db/:table` (authz `__HARBOR_ADMIN__:catalog:describe_table`)
-- `POST /checkpoint` (authz `__HARBOR_ADMIN__:checkpoint:create`)
-- `GET /sessions` (authz `__HARBOR_ADMIN__:sessions:list`)
-- `POST /interrupt` (authz `__HARBOR_ADMIN__:sessions:interrupt`)
-- `POST /sql/cancel` (authz `__HARBOR_ADMIN__:sessions:cancel`; lives in `SqlHandlers`)
-- OPTIONS preflight on each new mutating POST
-
-Load-bearing invariants:
-
-- `AuthManager::RunAuthorization` enforces centralized default-deny on
-  any `__HARBOR_ADMIN__:` string when no custom authz fn is configured,
-  unless `harbor_allow_admin_without_authz=true`. Detection by setting
-  presence (not fn-name string compare) so aliased/qualified names
-  cannot bypass.
-- `/schema/:db/:table` uses `duckdb_columns()` with bound `Value`
-  parameters — path components NEVER SQL-interpolated and NEVER in
-  the `__HARBOR_ADMIN__:` authz string.
-- Every mutating admin POST requires `Content-Type: application/json`,
-  bounds the body at `harbor_max_request_body_bytes`, and (when
-  cookie-authenticated) requires an `Origin` or `Referer` in
-  `harbor_cors_origins`.
-- `HarborSession` now carries `created_at`, `last_query`, and atomic
-  `query_in_flight`. `SessionManager::Snapshot()` uses correct lock
-  ordering (map → copy `shared_ptr`s → release → per-session brief).
-- `SessionManager::InterruptSession()` calls `Connection::Interrupt()`
-  without taking the per-session mutex (Interrupt is concurrency-safe;
-  taking the mutex would deadlock against the in-flight Execute).
-- Loud startup `WARN` log when `harbor_allow_admin_without_authz=true`
-  is in effect with no custom authz fn.
-
-Local verification:
-
-```bash
-make release
-make test_release                         # 44/44 (was 43; +1 PR-6 setting check)
-scripts/golden-cookie-auth.sh             # 14/14
-scripts/golden-sql-roundtrip.sh           # 19/19 (after the PR-6 default-deny opt-in)
-scripts/golden-admin-roundtrip.sh         # 26/26 (NEW — full admin HTTP coverage)
-```
-
-## Up next after PR-6: PR-7 (hardening)
-
-Per `AGENTS.md` Implementation roadmap, after PR-6 merges the
-remaining v0.1 work is hardening:
+Per `AGENTS.md` Implementation roadmap, the remaining v0.1 work is
+hardening:
 
 - Flip `reduced_ci_mode: 'enabled'` off; add `osx_amd64` + `linux_arm64`
   to the matrix (currently 5 platforms; target is the full 7).
@@ -144,10 +94,8 @@ remaining v0.1 work is hardening:
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb` — if PR-6 is still in flight, should show
-   `pr6-admin-handlers` (12+ modified files); if merged, `main` clean
-   at the PR-6 merge commit.
-3. If PR-6 merged and you are starting PR-7, branch off latest `main`:
+2. `git status -sb` — should show `main` clean and at `16617ba` or later.
+3. Branch off `main` for the next PR:
    ```bash
    git switch main
    git pull --ff-only
