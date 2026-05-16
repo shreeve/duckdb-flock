@@ -53,6 +53,12 @@ nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL harbor_cors_origins='https://app.example.com';
 SET GLOBAL harbor_max_request_body_bytes=1024;
+-- PR-6: __HARBOR_ADMIN__:sessions:create / :delete are now default-denied
+-- when no custom harbor_authorization_function is configured. This golden
+-- harness is a /sql smoke suite, not an authz suite — opt into the bypass
+-- so the harness exercises session create + transaction state. The
+-- dedicated default-deny matrix lives in scripts/golden-admin-roundtrip.sh.
+SET GLOBAL harbor_allow_admin_without_authz=true;
 CALL harbor_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &

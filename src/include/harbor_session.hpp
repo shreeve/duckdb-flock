@@ -12,8 +12,11 @@
 // QuackConnection; only the name changes to align with SPEC §6
 // vocabulary.
 
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -55,6 +58,33 @@ struct HarborSession {
 	//! is post-v0.1). New /sql sessions always have this set to a
 	//! non-empty 64-char hex by CreateOwnedSession().
 	string owner_principal_id;
+
+	// PR-6: instrumentation surfaced by AdminHandlers' GET /sessions.
+	//
+	// `created_at` is set in the ctor and never mutated. `last_query`
+	// is guarded by the per-session `lock`; handlers (SqlHandlers,
+	// QuackHandlers PREPARE/APPEND, UiHandlers /ddb/run) update it
+	// just before issuing Connection::Execute. `query_in_flight` is
+	// flipped true around Execute and false on completion (or on
+	// exception via a scope guard). It is std::atomic<bool> so
+	// SessionManager::Snapshot() can read it without acquiring the
+	// per-session mutex.
+	const std::chrono::steady_clock::time_point created_at;
+	string last_query;                       // guarded by `lock`
+	std::atomic<bool> query_in_flight {false};
+};
+
+// PR-6 — value snapshot of a HarborSession's instrumentation fields,
+// produced by SessionManager::Snapshot() for /sessions admin output.
+// Decoupled from HarborSession so the JSON encoder can iterate without
+// holding any mutex (the snapshot copy already paid the cost).
+struct SessionSnapshot {
+	string session_id;
+	string owner_principal_id;
+	std::chrono::steady_clock::time_point created_at;
+	string last_query;
+	bool last_query_truncated = false;
+	bool query_in_flight = false;
 };
 
 // Per-process session pool. Holds the active map + the lazy-init CSPRNG
@@ -141,6 +171,31 @@ public:
 	// Number of currently-active sessions. Snapshot value; may change between
 	// the call and any subsequent GetConnection.
 	idx_t ActiveCount();
+
+	// PR-6 — snapshot of session instrumentation for AdminHandlers'
+	// GET /sessions. Lock ordering (per round-18 review):
+	//   1. Take active_mutex; copy out shared_ptr<HarborSession>'s
+	//      and release active_mutex.
+	//   2. For each session, briefly take session->lock to copy
+	//      `last_query` (which is mutated under that lock).
+	//   3. Read query_in_flight via std::atomic — no lock needed.
+	//   4. `last_query` is truncated to `last_query_max_chars`; the
+	//      `last_query_truncated` flag indicates whether truncation
+	//      happened. Pass 0 to skip including last_query entirely.
+	std::vector<SessionSnapshot> Snapshot(idx_t last_query_max_chars = 200);
+
+	// PR-6 — interrupt the in-flight query (if any) on the named session.
+	// Returns true if the session was found and Connection::Interrupt()
+	// was called; false if the session id was unknown. Does NOT acquire
+	// the per-session mutex (Connection::Interrupt is documented as
+	// concurrency-safe — it sets the executor's interrupt flag, which
+	// the in-flight Execute checks at safe yield points).
+	//
+	// Used by /interrupt (admin) and /sql/cancel (admin). Both are
+	// authz-gated by the caller; SessionManager itself enforces no
+	// principal ownership check — admin scope deliberately spans
+	// principals.
+	bool InterruptSession(const string &session_id);
 
 private:
 	weak_ptr<DatabaseInstance> db;

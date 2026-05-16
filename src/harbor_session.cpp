@@ -9,11 +9,13 @@
 
 namespace duckdb {
 
-HarborSession::HarborSession(string session_id_p) : session_id(std::move(session_id_p)) {
+HarborSession::HarborSession(string session_id_p)
+    : session_id(std::move(session_id_p)), created_at(std::chrono::steady_clock::now()) {
 }
 
 HarborSession::HarborSession(string session_id_p, string owner_principal_id_p)
-    : session_id(std::move(session_id_p)), owner_principal_id(std::move(owner_principal_id_p)) {
+    : session_id(std::move(session_id_p)), owner_principal_id(std::move(owner_principal_id_p)),
+      created_at(std::chrono::steady_clock::now()) {
 }
 
 HarborSession::~HarborSession() {
@@ -202,6 +204,64 @@ bool SessionManager::DestroyOwnedSession(const string &session_id, const string 
 		return false;
 	}
 	active.erase(it);
+	return true;
+}
+
+std::vector<SessionSnapshot> SessionManager::Snapshot(idx_t last_query_max_chars) {
+	// Step 1: copy out shared_ptr<HarborSession>'s under the map lock,
+	// then release. Per round-18 review: lock ordering is map -> session,
+	// never both held simultaneously.
+	std::vector<shared_ptr<HarborSession>> sessions_local;
+	{
+		std::lock_guard<std::mutex> lock(active_mutex);
+		sessions_local.reserve(active.size());
+		for (auto &kv : active) {
+			sessions_local.push_back(kv.second);
+		}
+	}
+
+	std::vector<SessionSnapshot> out;
+	out.reserve(sessions_local.size());
+	for (auto &session : sessions_local) {
+		SessionSnapshot snap;
+		snap.session_id = session->session_id;
+		snap.owner_principal_id = session->owner_principal_id;
+		snap.created_at = session->created_at;
+		snap.query_in_flight = session->query_in_flight.load(std::memory_order_acquire);
+		if (last_query_max_chars > 0) {
+			std::lock_guard<duckdb::mutex> session_lock(session->lock);
+			if (session->last_query.size() > last_query_max_chars) {
+				snap.last_query = session->last_query.substr(0, last_query_max_chars);
+				snap.last_query_truncated = true;
+			} else {
+				snap.last_query = session->last_query;
+				snap.last_query_truncated = false;
+			}
+		}
+		out.push_back(std::move(snap));
+	}
+	return out;
+}
+
+bool SessionManager::InterruptSession(const string &session_id) {
+	// Lookup under map lock; copy the shared_ptr so the session stays
+	// alive for the Interrupt() call even if a concurrent disconnect
+	// erases the map entry. Connection::Interrupt() is documented as
+	// concurrency-safe (sets executor flag); we explicitly do NOT take
+	// the per-session mutex (it's held by the in-flight Execute that
+	// we're trying to interrupt — taking it would deadlock).
+	shared_ptr<HarborSession> session;
+	{
+		std::lock_guard<std::mutex> lock(active_mutex);
+		auto it = active.find(session_id);
+		if (it == active.end()) {
+			return false;
+		}
+		session = it->second;
+	}
+	if (session && session->duckdb_connection) {
+		session->duckdb_connection->Interrupt();
+	}
 	return true;
 }
 

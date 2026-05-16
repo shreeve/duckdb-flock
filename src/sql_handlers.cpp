@@ -289,6 +289,29 @@ struct StreamingCtx {
 	bool error_emitted = false;
 	std::chrono::steady_clock::time_point started_at;
 	bool chunk_mode = false;
+	// PR-6: when this StreamingCtx is destroyed (after the chunked
+	// content provider's last invocation, or upon premature failure),
+	// flip the session's query_in_flight signal back to false. The
+	// signal was raised before Execute() in HandleSql.
+	~StreamingCtx() {
+		if (session) {
+			session->query_in_flight.store(false, std::memory_order_release);
+		}
+	}
+};
+
+// PR-6 — RAII helper that pairs query_in_flight set-true (at the call
+// site, just before Execute()) with a guaranteed set-false on function
+// scope exit. For the streaming path, ownership of `session` is moved
+// into the StreamingCtx, which then becomes responsible for the reset
+// (see ~StreamingCtx above); the local guard becomes a no-op.
+struct InFlightGuard {
+	shared_ptr<HarborSession> session;
+	~InFlightGuard() {
+		if (session) {
+			session->query_in_flight.store(false, std::memory_order_release);
+		}
+	}
 };
 
 // Build the row/end/error chunk, push it to the sink in one go.
@@ -518,6 +541,20 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 
+	// PR-6 — record the in-flight query for /sessions visibility.
+	// last_query is mutated under the per-session lock (which we hold
+	// for non-ephemeral sessions; ephemeral sessions are not in the
+	// SessionManager pool and won't appear in Snapshot, so we skip
+	// instrumentation for them entirely). query_in_flight is std::atomic
+	// so /sessions can read it lock-free; reset on function scope exit
+	// via the InFlightGuard, OR on streaming completion via ~StreamingCtx.
+	InFlightGuard in_flight_guard;
+	if (!resolved.ephemeral && resolved.session) {
+		resolved.session->last_query = parsed.sql;
+		resolved.session->query_in_flight.store(true, std::memory_order_release);
+		in_flight_guard.session = resolved.session;
+	}
+
 	auto started_at = std::chrono::steady_clock::now();
 	unique_ptr<QueryResult> result;
 	try {
@@ -635,6 +672,13 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	ctx->started_at = started_at;
 	ctx->max_rows = ReadUbigintSetting(db, "harbor_max_response_rows", 0);
 	ctx->chunk_mode = (shape == ResponseShape::kNdjsonChunkMode);
+	// Transfer the in-flight signal ownership to ctx so ~StreamingCtx
+	// flips query_in_flight back to false when the streaming provider
+	// completes (or the shared_ptr<StreamingCtx> is dropped on premature
+	// shutdown). The local InFlightGuard becomes a no-op for the
+	// streaming path; non-streaming returns above us already flipped
+	// the flag back via the local guard's own destructor.
+	in_flight_guard.session.reset();
 
 	res.status = 200;
 	res.set_chunked_content_provider("application/x-ndjson", [ctx](size_t /*offset*/,
@@ -807,6 +851,94 @@ void SqlHandlers::HandleSessionDelete(const duckdb_httplib_openssl::Request &req
 	res.set_content(w.Take(), "application/json");
 }
 
+// ---------- POST /sql/cancel (PR-6) ----------
+//
+// Body: {"sessionId": "<sid>"}. Admin authz: __HARBOR_ADMIN__:sessions:cancel.
+// Same Connection::Interrupt() shape as AdminHandlers::HandleInterrupt
+// but a separate route + authz string so policies can grant cancel
+// without granting full interrupt. Cookie-authenticated callers must
+// pass an Origin/Referer in the harbor_cors_origins allow-list.
+
+void SqlHandlers::HandleSqlCancel(const duckdb_httplib_openssl::Request &req,
+                                    duckdb_httplib_openssl::Response &res,
+                                    const duckdb_httplib_openssl::ContentReader &content_reader) {
+	HarborHttpServer::ActiveRequestGuard guard(server);
+	ApplyCors(auth, req, res);
+
+	auto authn = AuthenticateForSql(auth, req, kAdminSessionId);
+	if (!authn.ok) {
+		RespondError(res, authn.status, authn.error_code, authn.message);
+		return;
+	}
+	if (authn.source == AuthSource::kCookie && !HasAllowedBrowserOrigin(server, auth, req)) {
+		RespondError(res, 403, "FORBIDDEN",
+		              "cookie-authenticated /sql/cancel requires an allowed Origin or Referer");
+		return;
+	}
+	if (!auth.RunAuthorization(kAdminSessionId, kAuthzCancelSession)) {
+		RespondError(res, 403, "FORBIDDEN", "authorization callback rejected the admin call");
+		return;
+	}
+	auto ct = req.get_header_value("Content-Type");
+	auto ct_lower = StringUtil::Lower(ct);
+	if (ct_lower.find("application/json") != 0) {
+		RespondError(res, 415, "UNSUPPORTED_MEDIA_TYPE", "/sql/cancel expects Content-Type: application/json");
+		return;
+	}
+	auto max_body = ReadUbigintSetting(db, "harbor_max_request_body_bytes", kDefaultMaxBodyBytes);
+	string body;
+	bool too_big = false;
+	content_reader([&](const char *data, size_t length) {
+		if (too_big) {
+			return false;
+		}
+		if (body.size() + length > max_body) {
+			too_big = true;
+			return false;
+		}
+		body.append(data, length);
+		return true;
+	});
+	if (too_big) {
+		RespondError(res, 413, "PAYLOAD_TOO_LARGE", "request body exceeds harbor_max_request_body_bytes");
+		return;
+	}
+
+	// Lightweight extraction — same shape as AdminHandlers'
+	// ExtractJsonSessionId. Anchoring to "sessionId":"…" avoids pulling
+	// in a JSON parser dep here.
+	string session_id;
+	auto pos = body.find("\"sessionId\"");
+	if (pos != string::npos) {
+		auto colon = body.find(':', pos);
+		if (colon != string::npos) {
+			auto q1 = body.find('"', colon);
+			if (q1 != string::npos) {
+				auto q2 = body.find('"', q1 + 1);
+				if (q2 != string::npos) {
+					session_id = body.substr(q1 + 1, q2 - (q1 + 1));
+				}
+			}
+		}
+	}
+	if (session_id.empty()) {
+		RespondError(res, 400, "BAD_REQUEST", "expected JSON body with a non-empty 'sessionId' field");
+		return;
+	}
+
+	if (!sessions.InterruptSession(session_id)) {
+		RespondError(res, 404, "SESSION_NOT_FOUND", "no session with the given id");
+		return;
+	}
+	fjs::JsonWriter w;
+	w.BeginObject();
+	w.KeyBool("ok", true);
+	w.KeyString("sessionId", session_id);
+	w.EndObject();
+	res.status = 200;
+	res.set_content(w.Take(), "application/json");
+}
+
 // ---------- registration ----------
 
 void SqlHandlers::Register(duckdb_httplib_openssl::Server &http) {
@@ -818,6 +950,13 @@ void SqlHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	http.Post("/sql/sessions/new",
 	          [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res) {
 		          self->HandleSessionNew(req, res);
+	          });
+	// PR-6: /sql/cancel is registered BEFORE the /sql/sessions/:id
+	// regex below so the more-specific path wins.
+	http.Post("/sql/cancel",
+	          [self](const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
+	                 const duckdb_httplib_openssl::ContentReader &content_reader) {
+		          self->HandleSqlCancel(req, res, content_reader);
 	          });
 	// cpp-httplib's `:id` syntax exists in PathParamsMatcher but
 	// Server::Delete (and Get/Post) wire patterns directly through

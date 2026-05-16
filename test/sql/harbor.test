@@ -240,3 +240,17 @@ query I
 SELECT current_setting('harbor_max_request_body_bytes')
 ----
 268435456
+
+# ------------------------------------------------------------------
+# PR-6: admin handlers — SQL-testable surface
+# ------------------------------------------------------------------
+# The HTTP-level admin behavior (default-deny matrix, /whoami, /tables,
+# /schema, /checkpoint, /sessions, /interrupt, /sql/cancel, CSRF +
+# Content-Type + body-limit guards) lives in
+# scripts/golden-admin-roundtrip.sh. The block below covers what's
+# testable via SQL alone: setting registration + default.
+
+query I
+SELECT current_setting('harbor_allow_admin_without_authz')
+----
+false

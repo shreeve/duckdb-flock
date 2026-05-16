@@ -4,9 +4,9 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-15 21:55 MDT
+**Last updated:** 2026-05-15 22:30 MDT
 **Last fully merged `main`:** `a03fbc9` — PR-12: rename duckdb-flock to duckdb-harbor (#12)
-**Active branch:** none yet — PR-6 (admin handlers) is the next planned PR; branch `pr6-admin-handlers` will be created off `main` when work begins.
+**Active branch:** `pr6-admin-handlers` (about to open as PR)
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -20,6 +20,11 @@ multi-protocol HTTP service on one port:
   merged, cookie-gated, credential-strip tested.
 - JSON SQL (`POST /sql`) — merged with NDJSON streaming, principal-owned
   sessions, golden-tested.
+- **Admin endpoints (PR-6, in flight as `pr6-admin-handlers`)** — `/ready`,
+  `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`,
+  `/interrupt`, `/sql/cancel`. `__HARBOR_ADMIN__:resource:action` authz
+  with centralized default-deny and `harbor_allow_admin_without_authz`
+  operator opt-in. 26-assertion HTTP golden test.
 
 Architecture is `httplib + OpenSSL` for v0.1. The PR-10b migration to
 mbedTLS/HTTPUtil/plain-httplib was evaluated and declined; do not
@@ -52,27 +57,74 @@ DuckDB-Wasm `wasm_mvp`) plus a matrix-generation step plus the
 intentionally excluded by `reduced_ci_mode: enabled`; PR-7+ revisits
 the full matrix.
 
-## Up next: PR-6 (admin handlers)
+## Active work: PR-6 (admin handlers)
 
-Per `AGENTS.md` Implementation roadmap, the next functional PR after
-the rename is PR-6 — admin handlers per SPEC §4:
+Branch `pr6-admin-handlers`. Implementation, instrumentation, and tests
+are all complete locally; ready to open the PR.
 
-- `GET /whoami`
-- `GET /tables`
-- `GET /schema/:db/:table`
-- `POST /checkpoint`
-- `GET /sessions`
-- `POST /sessions/:sid/interrupt`
-- `POST /sql/cancel` (deferred from PR-5; needs admin authz)
+Routes added (registered before UiHandlers' `GET /.*` catch-all):
 
-All routed through `harbor_authorization_function` with synthetic
-`__HARBOR_ADMIN__:<resource>:<action>` query strings (default-deny when
-no custom authz function is configured, unless
-`harbor_allow_admin_without_authz=true`).
+- `GET /ready` (public probe; runs `SELECT 1`)
+- `GET /whoami` (authz `__HARBOR_ADMIN__:server:whoami`)
+- `GET /tables` (authz `__HARBOR_ADMIN__:catalog:list_tables`)
+- `GET /schema/:db/:table` (authz `__HARBOR_ADMIN__:catalog:describe_table`)
+- `POST /checkpoint` (authz `__HARBOR_ADMIN__:checkpoint:create`)
+- `GET /sessions` (authz `__HARBOR_ADMIN__:sessions:list`)
+- `POST /interrupt` (authz `__HARBOR_ADMIN__:sessions:interrupt`)
+- `POST /sql/cancel` (authz `__HARBOR_ADMIN__:sessions:cancel`; lives in `SqlHandlers`)
+- OPTIONS preflight on each new mutating POST
 
-Path parameters MUST be identifier-escaped via
-`KeywordHelper::WriteQuoted(name, '"')` — never string-interpolated
-into SQL or into the `__HARBOR_ADMIN__:` policy string.
+Load-bearing invariants:
+
+- `AuthManager::RunAuthorization` enforces centralized default-deny on
+  any `__HARBOR_ADMIN__:` string when no custom authz fn is configured,
+  unless `harbor_allow_admin_without_authz=true`. Detection by setting
+  presence (not fn-name string compare) so aliased/qualified names
+  cannot bypass.
+- `/schema/:db/:table` uses `duckdb_columns()` with bound `Value`
+  parameters — path components NEVER SQL-interpolated and NEVER in
+  the `__HARBOR_ADMIN__:` authz string.
+- Every mutating admin POST requires `Content-Type: application/json`,
+  bounds the body at `harbor_max_request_body_bytes`, and (when
+  cookie-authenticated) requires an `Origin` or `Referer` in
+  `harbor_cors_origins`.
+- `HarborSession` now carries `created_at`, `last_query`, and atomic
+  `query_in_flight`. `SessionManager::Snapshot()` uses correct lock
+  ordering (map → copy `shared_ptr`s → release → per-session brief).
+- `SessionManager::InterruptSession()` calls `Connection::Interrupt()`
+  without taking the per-session mutex (Interrupt is concurrency-safe;
+  taking the mutex would deadlock against the in-flight Execute).
+- Loud startup `WARN` log when `harbor_allow_admin_without_authz=true`
+  is in effect with no custom authz fn.
+
+Local verification:
+
+```bash
+make release
+make test_release                         # 44/44 (was 43; +1 PR-6 setting check)
+scripts/golden-cookie-auth.sh             # 14/14
+scripts/golden-sql-roundtrip.sh           # 19/19 (after the PR-6 default-deny opt-in)
+scripts/golden-admin-roundtrip.sh         # 26/26 (NEW — full admin HTTP coverage)
+```
+
+## Up next after PR-6: PR-7 (hardening)
+
+Per `AGENTS.md` Implementation roadmap, after PR-6 merges the
+remaining v0.1 work is hardening:
+
+- Flip `reduced_ci_mode: 'enabled'` off; add `osx_amd64` + `linux_arm64`
+  to the matrix (currently 5 platforms; target is the full 7).
+- `harbor_query_timeout_s` runtime enforcement (setting is in SPEC,
+  but the executor-side interrupt-after-N-seconds wiring is PR-7).
+- Default-deny on unknown `Authorization:` schemes (today
+  `Authorization: Basic …` falls through to cookie/X-Harbor-Token; should
+  explicitly reject anything that isn't `Bearer`).
+- Login-page CSP + nonce.
+- Full nested-type param parser for `/sql` Mode B wrappers
+  (`LIST<...>`, `STRUCT(...)`, etc.).
+- More golden tests: per-DuckDB-type `/sql` round-trip in
+  `test/types/`; full byte-level Quack/UI fixtures in `test/golden/`.
+- Distribution: DuckDB community-extensions repo submission.
 
 ## Design decisions / caveats to preserve
 
@@ -92,18 +144,21 @@ into SQL or into the `__HARBOR_ADMIN__:` policy string.
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb` — should show `main` clean and at `a03fbc9` or later.
-3. Branch off `main` for the next PR:
+2. `git status -sb` — if PR-6 is still in flight, should show
+   `pr6-admin-handlers` (12+ modified files); if merged, `main` clean
+   at the PR-6 merge commit.
+3. If PR-6 merged and you are starting PR-7, branch off latest `main`:
    ```bash
    git switch main
    git pull --ff-only
-   git switch -c pr6-admin-handlers
+   git switch -c pr7-hardening
    ```
 4. Run a fresh sanity build:
    ```bash
    make release
-   make test_release
-   scripts/golden-cookie-auth.sh
-   scripts/golden-sql-roundtrip.sh
+   make test_release                  # 44/44
+   scripts/golden-cookie-auth.sh      # 14/14
+   scripts/golden-sql-roundtrip.sh    # 19/19
+   scripts/golden-admin-roundtrip.sh  # 26/26
    ```
 5. Confirm all green before starting new work.

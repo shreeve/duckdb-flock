@@ -36,6 +36,11 @@ public:
 	// Per SPEC §7 admin authz table: __HARBOR_ADMIN__:sessions:create.
 	static constexpr const char *kAuthzCreateSession = "__HARBOR_ADMIN__:sessions:create";
 	static constexpr const char *kAuthzDeleteSession = "__HARBOR_ADMIN__:sessions:delete";
+	// PR-6 — POST /sql/cancel: admin-authz gated, body {sessionId}.
+	// Distinct from /interrupt (handled by AdminHandlers) so an authz
+	// macro can grant `:sessions:cancel` (e.g. to a UI tool) without
+	// granting full `:sessions:interrupt`.
+	static constexpr const char *kAuthzCancelSession = "__HARBOR_ADMIN__:sessions:cancel";
 
 	SqlHandlers(HarborHttpServer &server, AuthManager &auth, SessionManager &sessions, weak_ptr<DatabaseInstance> db);
 	~SqlHandlers();
@@ -54,6 +59,10 @@ private:
 	// Session-lifecycle handlers.
 	void HandleSessionNew(const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res);
 	void HandleSessionDelete(const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res);
+
+	// PR-6 — POST /sql/cancel (deferred from PR-5; needs admin authz).
+	void HandleSqlCancel(const duckdb_httplib_openssl::Request &req, duckdb_httplib_openssl::Response &res,
+	                     const duckdb_httplib_openssl::ContentReader &content_reader);
 
 	// Borrowed references; lifetimes managed by HarborHttpServer.
 	HarborHttpServer &server;

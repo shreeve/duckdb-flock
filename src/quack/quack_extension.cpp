@@ -296,6 +296,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "(default 256 MiB; matches the nginx/Caddy reverse-proxy guidance for /quack APPEND payloads)",
 	    LogicalType::UBIGINT, Value::UBIGINT(268435456ULL), nullptr, SetScope::GLOBAL);
 
+	// PR-6: admin endpoints (/whoami, /tables, /schema/:db/:t, /checkpoint,
+	// /sessions, /interrupt, /sql/cancel) are gated by an internal
+	// default-deny rule on __HARBOR_ADMIN__:* synthetic authz strings
+	// when no custom harbor_authorization_function (or the quack-compat
+	// alias) is configured. Setting this to TRUE is the explicit
+	// "trusted-network deployment" opt-in; harbor_serve emits a loud
+	// WARN log on startup whenever the combination is in effect. Per
+	// SPEC §7 "Admin authorization is default-deny when no hook is
+	// configured" + round-18 review.
+	config.AddExtensionOption(
+	    "harbor_allow_admin_without_authz",
+	    "When true AND no custom harbor_authorization_function is set, admin endpoints "
+	    "(__HARBOR_ADMIN__:*) bypass the internal default-deny rule. Off by default; "
+	    "harbor_serve logs a loud WARN at startup when the combination is in effect.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+
 	// PR-3: UI extension settings. Keep upstream's `ui_*` names so
 	// existing duckdb-ui tooling/docs still apply. The local-port
 	// setting from upstream UI is intentionally NOT registered —

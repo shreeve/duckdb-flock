@@ -9,9 +9,11 @@
 #include "ui_handlers.hpp"   // ui::UiHandlers
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/main/database.hpp"
-#include "duckdb/main/config.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/database.hpp"
+#include "quack_log.hpp" // QuackLogType — we reuse the existing harbor/quack log type
 
 namespace duckdb {
 
@@ -150,6 +152,39 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 			// propagates out of harbor_serve cleanly.
 			auth->InitCorsConfig(cors_setting.GetValue<string>());
 		}
+
+		// PR-6 — loud startup WARN log when admin endpoints are
+		// configured to bypass authz on a deployment with no custom
+		// hook. Per SPEC §7 line 845: "Setting harbor_allow_admin_without_authz
+		// = true is the explicit opt-in for 'I really do want
+		// unrestricted admin access on this trusted-network
+		// deployment.' Logged loudly at server start."
+		auto setting_string_or = [&](const char *name) -> string {
+			Value v;
+			if (config.TryGetCurrentSetting(name, v) && !v.IsNull() && v.type().id() == LogicalTypeId::VARCHAR) {
+				return v.GetValue<string>();
+			}
+			return string();
+		};
+		auto setting_bool_or = [&](const char *name, bool fallback) -> bool {
+			Value v;
+			if (config.TryGetCurrentSetting(name, v) && !v.IsNull() && v.type().id() == LogicalTypeId::BOOLEAN) {
+				return v.GetValue<bool>();
+			}
+			return fallback;
+		};
+		bool custom_authz_configured = !setting_string_or("harbor_authorization_function").empty() ||
+		                               !setting_string_or("quack_authorization_function").empty();
+		bool allow_admin_without_authz = setting_bool_or("harbor_allow_admin_without_authz", false);
+		if (allow_admin_without_authz && !custom_authz_configured) {
+			auto &logger = Logger::Get(*db_locked);
+			logger.WriteLog(QuackLogType::NAME, LogLevel::LOG_WARNING,
+			                "WARNING: harbor_allow_admin_without_authz=true with no custom "
+			                "harbor_authorization_function — admin endpoints (/whoami, /tables, "
+			                "/schema, /checkpoint, /sessions, /interrupt, /sql/cancel) accept ANY "
+			                "authenticated principal. Set harbor_authorization_function for "
+			                "production deployments.");
+		}
 	}
 
 	// Order matters: cpp-httplib resolves routes in registration order.
@@ -160,8 +195,13 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 	quack_handlers = make_uniq<QuackHandlers>(*this, *sessions, *auth, db);
 	quack_handlers->Register(*server);
 
-	// AdminHandlers: /health, /info
-	admin_handlers = make_uniq<AdminHandlers>(*this);
+	// AdminHandlers: /health, /info, /ready, /whoami, /tables,
+	// /schema/:db/:table, /checkpoint, /sessions, /interrupt (PR-6).
+	// Authn-required routes go through AuthManager; SessionManager
+	// is needed for /sessions snapshot and /interrupt; db is needed
+	// for the system-view queries (/tables, /schema) and /ready's
+	// SELECT 1.
+	admin_handlers = make_uniq<AdminHandlers>(*this, *auth, *sessions, db);
 	admin_handlers->Register(*server);
 
 	// AuthHandlers: POST /auth/login, POST /auth/logout, OPTIONS /auth/*,

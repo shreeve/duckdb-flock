@@ -36,7 +36,7 @@ incrementally.
 | **PR-3** | Port `duckdb-ui` source as `UiHandlers` registered against the shared server. Migrated `HarborHttpServer` from `duckdb_httplib::Server` (plain) to `duckdb_httplib_openssl::Server` (one namespace throughout — UI handlers can register on the shared server cleanly). UI assets via `proxy` mode (forward `GET /.*` to `ui.duckdb.org` over OpenSSL-backed cpp-httplib HTTPS client — `bundled` mode is post-v0.1, see SPEC §14). Auth: upstream UI's same-Origin check (allowed Origins = loopback variants + bind host) — harbor cookie auth deferred to PR-4. AdminHandlers `/info` extended with `X-DuckDB-UI-Extension-Version`. `HarborHttpServer::ShutdownHandlers()` added so long-running threads (UiHandlers' Watcher, EventDispatcher's SSE consumers) get released BEFORE the active-request drain. SSE handler captures `shared_ptr<ActiveRequestGuard>` in the chunked content provider closure. CI grep guard updated to match both namespaces. | `/sql`, admin. `bundled` UI assets mode. Cookie auth + harbor_crypto + login wrapper (PR-4). |
 | **PR-4** | `src/harbor_crypto.{cpp,hpp}` wraps OpenSSL `libcrypto` for SHA-256 (`principal_id = hex(sha256(token))` per SPEC §6), HMAC-SHA256 (`harbor_session` cookie signing per SPEC §7), CSPRNG (`RAND_bytes` for ephemeral signing key + 16-byte cookie nonce), and base64url. New `AuthHandlers` registers `POST /auth/login` (synthetic sid `__HARBOR_AUTH__:login`), `POST /auth/logout`, `OPTIONS /auth/*`, `OPTIONS /quack`. AuthManager extended with `AuthenticateRequest()` returning `{ok, principal_id, source, error_code}` (precedence: `Authorization: Bearer` → `X-Harbor-Token` → `Cookie` — explicit-bad bearer never falls back to cookie). UiHandlers' Origin-set check supplemented with cookie-aware auth on `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`, AND `/localEvents`. The UI catch-all (`GET /.*`) is now cookie-gated: no valid cookie → minimal HTML login page; valid cookie → proxy through to `ui.duckdb.org` (Option B per round-11 review — single code path owns "serve UI asset"). UI connection pool keyed on `(principal_id, X-DuckDB-UI-Connection-Name)` so user-controlled connection names cannot collide across principals (round-11 blocker fix). Local-dev bypass uses fixed principal `__local_dev__` so the principal-scoped invariant holds even with `harbor_local_dev_mode=true`. `harbor_cors_origins` allow-list replaces the wildcard `Access-Control-Allow-Origin: *` on `/info`; `OPTIONS` preflight wired for `/quack` and `/auth/*`; `harbor_serve` refuses to start if `harbor_cors_origins='*'`. **Cookie signing key is ephemeral random per process** (NOT a SQL setting — closes the SQL-readable-secret leak; see SPEC §7 + §15 question 2). Settings registered: `harbor_auth_cookie_ttl_s`, `harbor_cors_origins`, `harbor_local_dev_mode`. | `/sql` (PR-5). Admin handlers (PR-6). `bundled` UI assets mode. `(principal, ui_connection_name) → db_session_id` map in SessionManager (PR-5 once /sql lands and SessionManager genuinely needs principal scope; PR-4 only scopes UiHandlers' connection-name pool). `?destroy_sessions=true` on `/auth/logout` (logged-but-ignored in PR-4). `harbor_cookie_signing_key` SQL setting (deferred to v0.2 as `HARBOR_COOKIE_SIGNING_KEY` env var). |
 | **PR-5** | `/sql` endpoint with `SqlHandlers` per SPEC §5.2–5.4. NDJSON streaming. Param decoding + type-encoding round trip. Principal-owned SQL sessions, `/sql/sessions/new`, `DELETE /sql/sessions/<id>`, `/auth/logout?destroy_sessions=true`, and `OPTIONS /sql` CORS preflight. | Admin handlers. `/sql/cancel`. Query timeout enforcement. UiHandlers migration to SessionManager. |
-| **PR-6** | Admin handlers (`/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__HARBOR_ADMIN__:resource:action` authz integration. | |
+| **PR-6** | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`) per SPEC §4. `__HARBOR_ADMIN__:resource:action` authz integration with centralized default-deny in `AuthManager::RunAuthorization` and `harbor_allow_admin_without_authz` operator opt-in. `POST /sql/cancel` shipped here too (admin authz on `:sessions:cancel`). HarborSession instrumented (`created_at`, `last_query`, `query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. | UiHandlers `last_query` instrumentation (v0.2 follow-up alongside UI-pool-into-SessionManager). `/schema/:db/:schema/:table` non-default schemas. CHECKPOINT auto-escalation to FORCE CHECKPOINT. `harbor_query_timeout_s` runtime enforcement (PR-7 hardening). |
 | **PR-7+** | Hardening, full CI matrix (`osx_arm64`, `osx_amd64`, `linux_amd64`, `linux_arm64`, `windows_amd64`), golden tests, doc polish, distribution. | |
 | ~~**PR-10b**~~ | **EVALUATED AND DECLINED** for v0.1 — see "PR-10b: declined" below. The OpenSSL/cpp-httplib architectural cleanup was originally planned post-PR-7. After the round-13/round-14 architectural review reduced its scope (vcpkg deps stay; the only concrete win is dropping harbor's *direct* libssl/libcrypto link), the cost-benefit no longer justified the migration risk. May be revisited under specific trigger conditions; see the dedicated section below. | n/a |
 
@@ -305,6 +305,148 @@ PR-5 deliberate deferrals:
 4. **Full nested-type param parser** — Mode B wrapper parsing supports
    core scalar type strings in PR-5. Nested explicit wrapper type
    parsing (`LIST<...>`, `STRUCT(...)`, etc.) is PR-7 hardening.
+
+### PR-6 acceptance closure (closed)
+
+PR-6 added the admin handler surface per SPEC §4 + §7. Design was
+reviewed with GPT-5.5 round 18 before coding; the load-bearing catches
+were: track "custom authz configured?" by setting presence (not
+fn-name string compare), pivot `/schema/:db/:table` to `duckdb_columns()`
+with bound parameters (vs. composing identifiers into a SQL string),
+require CSRF + Content-Type + body-limit on every mutating POST, and
+fix the lock ordering for `SessionManager::Snapshot()` (map-lock →
+copy `shared_ptr`s → release → per-session brief lock).
+
+- [x] `AuthManager::RunAuthorization` enforces a centralized
+      default-deny on `__HARBOR_ADMIN__:` synthetic strings whenever
+      no custom hook is configured (both `harbor_authorization_function`
+      and `quack_authorization_function` empty), unless the new
+      `harbor_allow_admin_without_authz=true` operator opt-in is set.
+      Detection is by setting presence — not by string-comparing the
+      resolved fn name to the literal `"harbor_nop_authorization"` —
+      so schema-qualified, cased, or aliased names cannot silently
+      bypass the rule.
+- [x] `harbor_allow_admin_without_authz` BOOLEAN default `false`,
+      registered alongside the other PR-4/PR-5 settings.
+- [x] Loud startup `WARN` log via the existing Harbor/Quack log type
+      whenever `harbor_allow_admin_without_authz=true` is in effect
+      with no custom authz function — per SPEC §7 line 845
+      ("Logged loudly at server start").
+- [x] `HarborSession` instrumented with `created_at` (steady_clock,
+      set in ctor), `last_query` (string, mutated under per-session
+      `lock`), and `query_in_flight` (`std::atomic<bool>`). Wired in
+      `SqlHandlers::HandleSql` (around `Execute()` + the streaming
+      provider lifetime) and `QuackHandlers` PREPARE / FETCH / APPEND
+      cases. UiHandlers' `/ddb/run` is intentionally NOT instrumented
+      — its connections live in the separate `UIStorageExtensionInfo`
+      pool and don't appear in `SessionManager::active`; the
+      UI-pool-into-SessionManager migration is a v0.2 follow-up.
+- [x] `SessionManager::Snapshot(idx_t last_query_max_chars)` returns
+      a `vector<SessionSnapshot>` for `/sessions` JSON output. Lock
+      ordering: take map mutex, copy `shared_ptr<HarborSession>`'s,
+      release map mutex, then briefly take each session's `lock` to
+      copy `last_query`. `query_in_flight` is read via std::atomic
+      without taking the per-session lock. `SessionSnapshot.last_query`
+      is truncated to `last_query_max_chars` (200 in /sessions); the
+      `last_query_truncated` boolean indicates whether truncation
+      happened.
+- [x] `SessionManager::InterruptSession(sid)` looks up under map
+      lock, copies the `shared_ptr` so the session stays alive for
+      the call, releases map lock, then invokes `Connection::Interrupt()`
+      WITHOUT taking the per-session mutex (Interrupt is concurrency-
+      safe by design — it just sets the executor's interrupt flag).
+- [x] `AdminHandlers` ctor extended to take `(server, auth, sessions, db)`
+      and registers all 8 admin routes per SPEC §4: `/health` (PR-2),
+      `/info` (PR-2), `/ready` (new), `/whoami`, `/tables`,
+      `/schema/:db/:table`, `/checkpoint`, `/sessions`, `/interrupt`.
+- [x] `/schema/:db/:table` uses `duckdb_columns()` with bound `Value`
+      parameters for `database_name` and `table_name` — path
+      parameters are NEVER string-interpolated into SQL or into the
+      `__HARBOR_ADMIN__:` policy decision input (per SPEC §7). Default
+      schema is `main`; a future `/schema/:db/:schema/:table` can
+      cover non-default schemas. Missing-table returns 404
+      `NOT_FOUND`; 200 returns the columns array with name, type,
+      nullable, and default (NULL when absent).
+- [x] `/checkpoint` runs plain `CHECKPOINT;` and reports `409 CONFLICT`
+      cleanly when DuckDB returns "Cannot CHECKPOINT: there are other
+      write transactions active". Operators who want forcing semantics
+      issue `FORCE CHECKPOINT` via `/sql` from a privileged session;
+      auto-escalating in the handler would risk indefinite blocks.
+      Response shape: `{ok:true, checkpointed_at:<iso UTC>,
+      wal_state_available:false}` — explicit about the v0.1 limitation
+      that v1.5.2 doesn't expose stable WAL-size accounting from a
+      Connection.
+- [x] `/sessions` returns `{ok:true, sessions:[{session_id, principal,
+      age_s, in_flight, last_query, last_query_truncated}]}` from
+      `SessionManager::Snapshot(200)`.
+- [x] `/interrupt` and `/sql/cancel` (the latter lives in `SqlHandlers`)
+      both require `Content-Type: application/json`, cap the body at
+      `harbor_max_request_body_bytes` (413 on overflow), parse a
+      lightweight `{"sessionId":"…"}` envelope, and call
+      `SessionManager::InterruptSession()`. Distinct authz strings
+      (`__HARBOR_ADMIN__:sessions:interrupt` vs.
+      `__HARBOR_ADMIN__:sessions:cancel`) so a custom authz macro can
+      grant cancel without granting full interrupt.
+- [x] Cookie-authenticated mutating POSTs (`/checkpoint`, `/interrupt`,
+      `/sql/cancel`) require an `Origin` (or, falling back, `Referer`)
+      in `harbor_cors_origins` — same CSRF gate that PR-5 applied to
+      `/sql`. Bearer / `X-Harbor-Token` callers bypass the gate (they
+      are not browser-ambient).
+- [x] OPTIONS preflight registered in `AuthHandlers` for `/checkpoint`,
+      `/interrupt`, `/sql/cancel` alongside the existing `/sql`,
+      `/sql/sessions/*`, `/auth/*`, `/quack` preflights.
+- [x] PR-5's `__HARBOR_ADMIN__:sessions:create` /
+      `__HARBOR_ADMIN__:sessions:delete` paths now genuinely default-deny
+      (PR-5 had registered the strings but the rule wasn't enforced
+      yet). The `/sql` golden harness opts into the bypass with one
+      new `SET GLOBAL harbor_allow_admin_without_authz=true` line so
+      it can keep exercising session create + transaction state without
+      writing a custom authz fn.
+- [x] `test/sql/harbor.test` extended (43 → 44 assertions) with
+      `harbor_allow_admin_without_authz` setting registration +
+      default value.
+- [x] HTTP-level admin coverage added: `scripts/golden-admin-roundtrip.sh`
+      (26 assertions across three server lifecycles — default-deny mode,
+      admin-bypass mode, and a custom authz-fn mode that grants
+      per-resource:action so the SPEC §7 grammar is provably decidable).
+      Covers: /health/info/ready public probes, default-deny matrix
+      across 7 admin routes, /whoami identity JSON, /tables shape +
+      after-CREATE-TABLE reflection, /schema 404 on missing,
+      /schema identifier safety against quoted-name attacks,
+      /schema 200 on existing (columns array + database/schema fields),
+      /checkpoint 200-or-409 contract (never 5xx), /interrupt 415/400/404/200,
+      /interrupt body-limit 413, /sessions empty + post-create snapshot
+      with all instrumentation fields, /sql/cancel 200 happy path,
+      cookie-auth Origin gating (no/allowed/disallowed → 403/200/403),
+      OPTIONS preflight for /interrupt, /sql/cancel, /checkpoint,
+      and per-resource granular gating with a custom authz fn.
+- [x] All four test suites green:
+      `make test_release` (44/44),
+      `scripts/golden-cookie-auth.sh` (14/14),
+      `scripts/golden-sql-roundtrip.sh` (19/19),
+      `scripts/golden-admin-roundtrip.sh` (26/26).
+
+PR-6 deliberate deferrals:
+
+1. **Query-timeout enforcement (`harbor_query_timeout_s`)** — PR-7
+   hardening. Setting remains in SPEC; runtime interrupt-after-N-seconds
+   is not in PR-6.
+2. **UiHandlers `last_query`/`query_in_flight` instrumentation** —
+   v0.2 follow-up alongside the UI-pool-into-`SessionManager` merge.
+   `/sessions` legitimately reflects `/quack` and `/sql` sessions only
+   today; admins observing UI activity should use upstream DuckDB
+   instrumentation (`pragma_database_size`, `duckdb_logs_parsed`).
+3. **`/schema/:db/:schema/:table`** — non-default schema support.
+   v0.1 only describes `<db>.main.<table>`; the route table will get
+   a 3-segment variant in PR-7+.
+4. **CHECKPOINT auto-escalation to FORCE CHECKPOINT** — declined for
+   v0.1. Auto-escalating risks indefinite blocks; the 409 CONFLICT
+   contract gives operators an explicit retry/escalate decision point.
+5. **Default-deny on `__HARBOR_ADMIN__:server:whoami` carve-out** —
+   declined per round-18 review. SPEC literal applies uniformly across
+   all `__HARBOR_ADMIN__:*` strings; operators flip
+   `harbor_allow_admin_without_authz=true` for unrestricted dev access
+   or write a custom authz fn.
 
 ### PR-8 acceptance closure (closed)
 
