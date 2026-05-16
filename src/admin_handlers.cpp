@@ -177,6 +177,12 @@ AdminAuthOutcome AuthenticateAdmin(AuthManager &auth, const duckdb_httplib_opens
 		out.error_code = "UNAUTHORIZED";
 		if (authn.error_code == "MISSING_CREDENTIAL") {
 			out.message = "missing credential — provide Authorization: Bearer or harbor_session cookie";
+		} else if (authn.error_code == "UNSUPPORTED_AUTH_SCHEME") {
+			// PR-7c (round-23): more useful than the generic UNAUTHORIZED
+			// message when an operator misconfigures a reverse proxy or
+			// accidentally sends `Authorization: Basic`/`Digest`/etc.
+			out.error_code = "UNSUPPORTED_AUTH_SCHEME";
+			out.message = "unsupported Authorization scheme — only Bearer is accepted";
 		} else if (authn.error_code == "INVALID_TOKEN") {
 			out.message = "invalid bearer token";
 		} else if (authn.error_code == "BAD_COOKIE_SIG" || authn.error_code == "BAD_COOKIE_FORMAT" ||

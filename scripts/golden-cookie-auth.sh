@@ -327,4 +327,80 @@ assert_no_harbor_auth_leak "x-harbor-token auth"
 pass "PR-8 C: X-Harbor-Token-authenticated proxy strips the token header upstream"
 
 echo
+# ============================================================================
+# PR-7c — auth scheme tightening + login-page CSP+nonce
+# ============================================================================
+
+# Item 1 regression guards: non-Bearer Authorization explicitly rejected.
+# Even with a valid cookie present, an explicit `Authorization: Basic` MUST
+# return 401 with errorCode UNSUPPORTED_AUTH_SCHEME, NOT silently fall back
+# to cookie auth. PR-4's round-11 invariant: explicit-bad credential must
+# not be masked by ambient browser state.
+#
+# These guards exist so a future refactor can't accidentally regress the
+# "Authorization is checked first and dominates" rule.
+LOGIN_RESP="$(curl -s -i -X POST "http://127.0.0.1:${PORT}/auth/login" \
+    -H "Authorization: Bearer ${TOKEN}" -d '')"
+COOKIE_VAL_R7C="$(echo "${LOGIN_RESP}" | tr -d '\r' \
+    | awk '/^Set-Cookie: harbor_session=/{print substr($2, index($2, "=") + 1); exit}' \
+    | sed 's/;.*//')"
+[[ -n "${COOKIE_VAL_R7C}" ]] || fail "PR-7c setup: could not get cookie for non-Bearer test"
+
+# /sql with `Authorization: Basic ...` + valid cookie → 401, no fallback.
+RESP="$(curl -s -i -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H 'Authorization: Basic dXNlcjpwYXNz' \
+    -b "harbor_session=${COOKIE_VAL_R7C}" \
+    -H 'Content-Type: application/json' \
+    -d '{"sql":"SELECT 42"}')"
+echo "${RESP}" | grep -qi '^HTTP/1.1 401' \
+    || fail "PR-7c: /sql with Authorization: Basic + valid cookie expected 401 (got: $(echo "${RESP}" | head -1))"
+echo "${RESP}" | grep -q '"errorCode":"UNSUPPORTED_AUTH_SCHEME"' \
+    || fail "PR-7c: /sql 401 missing errorCode UNSUPPORTED_AUTH_SCHEME"
+pass "PR-7c: non-Bearer Authorization + valid cookie → 401 UNSUPPORTED_AUTH_SCHEME (no fallback)"
+
+# /auth/login with `Authorization: Basic ...` and a valid token in body
+# MUST also be rejected — the explicit-bad scheme must not be masked by
+# the body fallback.
+RESP="$(curl -s -i -X POST "http://127.0.0.1:${PORT}/auth/login" \
+    -H 'Authorization: Basic dXNlcjpwYXNz' \
+    -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${TOKEN}\"}")"
+echo "${RESP}" | grep -qi '^HTTP/1.1 401' \
+    || fail "PR-7c: /auth/login with Basic scheme expected 401"
+# /auth/login uses {"error":"<code>","message":"..."} envelope shape
+# (different from /sql's {"ok":false,"error":<msg>,"errorCode":<code>}).
+# Both shapes use the same code values; the JSON keys differ.
+echo "${RESP}" | grep -q '"error":"UNSUPPORTED_AUTH_SCHEME"' \
+    || fail "PR-7c: /auth/login UNSUPPORTED_AUTH_SCHEME code missing"
+pass "PR-7c: /auth/login with Basic scheme → 401 UNSUPPORTED_AUTH_SCHEME (body fallback NOT taken)"
+
+# Item 2: login-page CSP + nonce.
+LOGIN_PAGE="$(curl -s -i "http://127.0.0.1:${PORT}/")"
+echo "${LOGIN_PAGE}" | grep -qi '^Content-Security-Policy:' \
+    || fail "PR-7c: GET / login page missing Content-Security-Policy header"
+# CSP MUST contain nonce-... and MUST NOT allow 'unsafe-inline' for script-src.
+CSP_LINE="$(echo "${LOGIN_PAGE}" | tr -d '\r' | awk -F': ' '/^[Cc]ontent-[Ss]ecurity-[Pp]olicy:/{print $2; exit}')"
+echo "${CSP_LINE}" | grep -qE "script-src 'nonce-[A-Za-z0-9+/=]+'" \
+    || fail "PR-7c: CSP missing 'script-src nonce-<value>'; CSP=${CSP_LINE}"
+echo "${CSP_LINE}" | grep -q "'unsafe-inline'" | grep -q "script-src" \
+    && fail "PR-7c: CSP MUST NOT allow 'unsafe-inline' in script-src"
+echo "${CSP_LINE}" | grep -q "default-src 'none'" \
+    || fail "PR-7c: CSP missing 'default-src none' baseline"
+echo "${CSP_LINE}" | grep -q "frame-ancestors 'none'" \
+    || fail "PR-7c: CSP missing 'frame-ancestors none'"
+# The page MUST include a `<script nonce="...">` tag with the same nonce.
+NONCE_FROM_CSP="$(echo "${CSP_LINE}" | sed -E "s/.*nonce-([A-Za-z0-9+/=]+).*/\1/")"
+echo "${LOGIN_PAGE}" | grep -q "<script nonce=\"${NONCE_FROM_CSP}\">" \
+    || fail "PR-7c: login page <script nonce> tag does not match CSP nonce"
+pass "PR-7c: login page CSP header + matching <script nonce>"
+
+# Two consecutive GET / requests have DIFFERENT nonces (per-request CSPRNG).
+LOGIN_1="$(curl -s -i "http://127.0.0.1:${PORT}/" | tr -d '\r')"
+LOGIN_2="$(curl -s -i "http://127.0.0.1:${PORT}/" | tr -d '\r')"
+NONCE_1="$(echo "${LOGIN_1}" | awk -F': ' '/^[Cc]ontent-[Ss]ecurity-[Pp]olicy:/{print $2; exit}' | sed -E "s/.*nonce-([A-Za-z0-9+/=]+).*/\1/")"
+NONCE_2="$(echo "${LOGIN_2}" | awk -F': ' '/^[Cc]ontent-[Ss]ecurity-[Pp]olicy:/{print $2; exit}' | sed -E "s/.*nonce-([A-Za-z0-9+/=]+).*/\1/")"
+[[ -n "${NONCE_1}" && -n "${NONCE_2}" ]] || fail "PR-7c: missing nonce on consecutive GET / requests"
+[[ "${NONCE_1}" != "${NONCE_2}" ]] || fail "PR-7c: consecutive GET / returned the same nonce (CSPRNG broken or static)"
+pass "PR-7c: consecutive GET / requests have distinct CSPRNG nonces"
+
 green "All cookie-auth + credential-strip golden assertions passed."

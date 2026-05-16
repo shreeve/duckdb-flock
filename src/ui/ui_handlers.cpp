@@ -191,10 +191,19 @@ const std::string &LocalDevPrincipalId() {
 // the cookie-bearing reload hits the cookie-gated catch-all and
 // proxies through to the real UI.
 //
+// PR-7c (round-23) — CSP-enforced. The page is split into a prefix
+// + suffix around the inline `<script>` tag so a per-request CSPRNG
+// nonce can be interpolated as `<script nonce="...">`. The CSP
+// header (set by HandleProxyGet) is `default-src 'none'`, with
+// `script-src 'nonce-<nonce>'` allowing only the script tag bearing
+// the matching nonce. Inline `<style>` keeps `'unsafe-inline'` for
+// style-src; it's not the XSS surface and a per-style nonce would
+// add complexity without a security benefit on this minimal page.
+//
 // Kept deliberately minimal: no external deps, no fonts, no
 // frameworks. ~70 lines total. Substantive UX work (token rotation,
 // multi-user, etc.) is post-v0.1 (SPEC §15 q4).
-const char *kHarborLoginPage = R"HARBOR(<!doctype html>
+const char *kHarborLoginPagePrefix = R"HARBOR(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -237,7 +246,12 @@ const char *kHarborLoginPage = R"HARBOR(<!doctype html>
   <button id="b" type="submit">Sign in</button>
   <div class="err" id="e"></div>
 </form>
-<script>
+)HARBOR";
+
+// PR-7c — closing chunk of the login page (everything from the
+// nonce-bearing `<script>` tag onward). Concatenated by RenderLoginPage()
+// with a per-request `<script nonce="...">` opening tag in between.
+const char *kHarborLoginPageSuffix = R"HARBOR(
   const f=document.getElementById('f'),b=document.getElementById('b'),
         t=document.getElementById('t'),e=document.getElementById('e');
   f.addEventListener('submit', async (ev)=>{
@@ -258,6 +272,73 @@ const char *kHarborLoginPage = R"HARBOR(<!doctype html>
 </body>
 </html>
 )HARBOR";
+
+// PR-7c — generate a fresh CSPRNG-backed nonce for the login page's
+// CSP header + inline `<script nonce="...">` attribute. Per round-23
+// review (GPT-5.5): use STANDARD base64 (not base64url) for max CSP
+// grammar compatibility — base64url is generally accepted by modern
+// browsers but standard base64 is what the CSP spec examples use.
+// Output of `harbor_crypto::Base64Encode` (or fallback to handcoded
+// here if needed) for 16 random bytes is 24 characters with `=`
+// padding; we keep the padding because CSP grammar accepts it.
+//
+// 16 bytes (128 bits) of entropy is more than the OWASP minimum
+// (60+ bits) and is the same size as the cookie nonce in PR-4.
+//
+// Failure path: if RandomBytes throws (CSPRNG unavailable; broken
+// kernel entropy on a misconfigured container), let the exception
+// propagate. The HandleProxyGet caller catches and returns a 500
+// rather than serve the login page WITHOUT CSP (round-23 catch).
+std::string GenerateScriptNonce() {
+	auto bytes = duckdb::harbor_crypto::RandomBytes(16);
+	// Standard base64 alphabet, with `=` padding. The
+	// harbor_crypto::Base64UrlEncode helper used elsewhere is
+	// URL-safe (- _ in place of + /); for CSP we use the standard
+	// alphabet.
+	static const char kAlphabet[] =
+	    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve(((bytes.size() + 2) / 3) * 4);
+	for (size_t i = 0; i + 2 < bytes.size(); i += 3) {
+		uint32_t triplet = (uint32_t(bytes[i]) << 16) | (uint32_t(bytes[i + 1]) << 8) | uint32_t(bytes[i + 2]);
+		out.push_back(kAlphabet[(triplet >> 18) & 0x3F]);
+		out.push_back(kAlphabet[(triplet >> 12) & 0x3F]);
+		out.push_back(kAlphabet[(triplet >> 6) & 0x3F]);
+		out.push_back(kAlphabet[triplet & 0x3F]);
+	}
+	const auto remaining = bytes.size() % 3;
+	if (remaining == 1) {
+		const uint32_t single = uint32_t(bytes[bytes.size() - 1]) << 16;
+		out.push_back(kAlphabet[(single >> 18) & 0x3F]);
+		out.push_back(kAlphabet[(single >> 12) & 0x3F]);
+		out.push_back('=');
+		out.push_back('=');
+	} else if (remaining == 2) {
+		const uint32_t pair = (uint32_t(bytes[bytes.size() - 2]) << 16) | (uint32_t(bytes[bytes.size() - 1]) << 8);
+		out.push_back(kAlphabet[(pair >> 18) & 0x3F]);
+		out.push_back(kAlphabet[(pair >> 12) & 0x3F]);
+		out.push_back(kAlphabet[(pair >> 6) & 0x3F]);
+		out.push_back('=');
+	}
+	return out;
+}
+
+// PR-7c — assemble the login page with a per-request nonce attribute
+// on the inline `<script>` tag. Used by HandleProxyGet's no-cookie
+// branch. The CSP header is set on the response separately by the
+// caller; the nonce value is the SAME in both places.
+std::string RenderLoginPage(const std::string &nonce) {
+	std::string out;
+	out.reserve(std::strlen(kHarborLoginPagePrefix) + std::strlen(kHarborLoginPageSuffix) + 64);
+	out.append(kHarborLoginPagePrefix);
+	// The script tag opens here. nonce is base64-only so safe to
+	// interpolate into the HTML attribute without escaping.
+	out.append("<script nonce=\"");
+	out.append(nonce);
+	out.append("\">");
+	out.append(kHarborLoginPageSuffix);
+	return out;
+}
 
 } // namespace
 
@@ -413,8 +494,33 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 	auto authn = AuthorizeUiRequest(req, /*require_origin_allowed=*/false);
 	if (!authn.ok) {
 		if (req.path == "/" || req.path.empty()) {
+			// PR-7c — generate a fresh per-request CSPRNG nonce, set
+			// the `Content-Security-Policy` header pinning script
+			// execution to that nonce ONLY, then render the login
+			// page with `<script nonce="...">`. If RandomBytes
+			// throws (CSPRNG unavailable), do NOT fall back to
+			// serving the login page without CSP — return 500 so
+			// the operator notices.
+			std::string nonce;
+			try {
+				nonce = GenerateScriptNonce();
+			} catch (const std::exception &ex) {
+				res.status = 500;
+				res.set_content("Login page unavailable (csprng): " + std::string(ex.what()),
+				                "text/plain; charset=utf-8");
+				return;
+			}
+			std::string csp =
+			    "default-src 'none'; "
+			    "script-src 'nonce-" + nonce + "'; "
+			    "style-src 'unsafe-inline'; "
+			    "connect-src 'self'; "
+			    "form-action 'self'; "
+			    "base-uri 'none'; "
+			    "frame-ancestors 'none'";
+			res.set_header("Content-Security-Policy", csp);
 			res.status = 200;
-			res.set_content(kHarborLoginPage, "text/html; charset=utf-8");
+			res.set_content(RenderLoginPage(nonce), "text/html; charset=utf-8");
 		} else {
 			res.status = 401;
 			res.set_content("Unauthorized — sign in at /\n", "text/plain; charset=utf-8");
