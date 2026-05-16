@@ -120,18 +120,21 @@ string HexEncode(const data_t *bytes, idx_t n) {
 } // namespace
 
 string SessionManager::GenerateSessionId() {
-	{
-		std::lock_guard<std::mutex> lock(rng_mutex);
-		if (!rng) {
-			auto db_locked = db.lock();
-			if (!db_locked) {
-				throw InternalException("Database was closed");
-			}
-			auto encryption_util = db_locked->GetEncryptionUtil(false);
-			auto metadata = make_uniq<EncryptionStateMetadata>(
-			    EncryptionTypes::GCM, kSessionIdBytes, EncryptionTypes::EncryptionVersion::NONE);
-			rng = encryption_util->CreateEncryptionState(std::move(metadata));
+	// PR-6 follow-up (round 19): hold rng_mutex across GenerateRandomData
+	// too. Releasing the lock between init and generation was a TOCTOU
+	// race under concurrent `/sql/sessions/new` — `EncryptionState`
+	// instances aren't documented as concurrent-safe. Session creation
+	// is not hot enough to optimize this; correctness wins.
+	std::lock_guard<std::mutex> lock(rng_mutex);
+	if (!rng) {
+		auto db_locked = db.lock();
+		if (!db_locked) {
+			throw InternalException("Database was closed");
 		}
+		auto encryption_util = db_locked->GetEncryptionUtil(false);
+		auto metadata = make_uniq<EncryptionStateMetadata>(
+		    EncryptionTypes::GCM, kSessionIdBytes, EncryptionTypes::EncryptionVersion::NONE);
+		rng = encryption_util->CreateEncryptionState(std::move(metadata));
 	}
 
 	data_t bytes[kSessionIdBytes];

@@ -881,7 +881,14 @@ void SqlHandlers::HandleSqlCancel(const duckdb_httplib_openssl::Request &req,
 	}
 	auto ct = req.get_header_value("Content-Type");
 	auto ct_lower = StringUtil::Lower(ct);
-	if (ct_lower.find("application/json") != 0) {
+	// PR-6 follow-up (round 19): tighter Content-Type check; the prior
+	// prefix-only `find(...) != 0` accepted `application/jsonjunk`.
+	while (!ct_lower.empty() && std::isspace(static_cast<unsigned char>(ct_lower.front()))) {
+		ct_lower.erase(ct_lower.begin());
+	}
+	const bool ct_ok = ct_lower == "application/json" || StringUtil::StartsWith(ct_lower, "application/json;") ||
+	                   StringUtil::StartsWith(ct_lower, "application/json ");
+	if (!ct_ok) {
 		RespondError(res, 415, "UNSUPPORTED_MEDIA_TYPE", "/sql/cancel expects Content-Type: application/json");
 		return;
 	}

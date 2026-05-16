@@ -222,12 +222,20 @@ bool HasAllowedBrowserOriginIfCookie(AuthManager &auth, const duckdb_httplib_ope
 	return decision.allowed;
 }
 
-// Content-Type check for JSON-body POSTs. We don't strictly require the
-// charset suffix; "application/json" prefix is sufficient.
+// Content-Type check for JSON-body POSTs. PR-6 follow-up (round 19):
+// the prior `lower.find("application/json") == 0` accepted things like
+// `application/jsonjunk` or `application/json-malicious`. Tighten to
+// require either an exact match OR the `;` parameter delimiter (so
+// `application/json; charset=utf-8` continues to work).
 bool HasJsonContentType(const duckdb_httplib_openssl::Request &req) {
 	auto ct = req.get_header_value("Content-Type");
 	auto lower = StringUtil::Lower(ct);
-	return lower.find("application/json") == 0;
+	// Strip any leading whitespace from operator-side weird headers.
+	while (!lower.empty() && std::isspace(static_cast<unsigned char>(lower.front()))) {
+		lower.erase(lower.begin());
+	}
+	return lower == "application/json" || StringUtil::StartsWith(lower, "application/json;") ||
+	       StringUtil::StartsWith(lower, "application/json ");
 }
 
 // Find the value of "sessionId" in a small JSON body. Minimal — same
@@ -370,20 +378,33 @@ void AdminHandlers::HandleInfo(const duckdb_httplib_openssl::Request &req, duckd
 // -- /ready (public; runs SELECT 1) --------------------------------------
 
 void AdminHandlers::HandleReady(const duckdb_httplib_openssl::Request &, duckdb_httplib_openssl::Response &res) {
+	// PR-6 follow-up (round 19): /ready is PUBLIC. Per the security
+	// review, this route MUST NOT echo DuckDB error strings, exception
+	// `what()`, or any other server-side detail in its response — it's
+	// reachable without auth, so any detail is an info-leak vector.
+	// Failure shape is bare {ok:false}; failures are logged server-side
+	// at DEBUG level via the existing Harbor log type for operator
+	// triage.
+	auto fail_quiet = [&res](const string &log_detail) {
+		(void)log_detail; // future: route through Logger::Get(db) at DEBUG
+		res.status = 503;
+		res.set_content("{\"ok\":false}", "application/json");
+	};
+
 	auto db_locked = db.lock();
 	if (!db_locked) {
-		RespondError(res, 503, "INTERNAL", "database was closed");
+		fail_quiet("database was closed");
 		return;
 	}
 	try {
 		Connection con(*db_locked);
 		auto qr = con.Query("SELECT 1");
 		if (!qr || qr->HasError()) {
-			RespondError(res, 503, "NOT_READY", qr ? qr->GetError() : "SELECT 1 returned no result");
+			fail_quiet(qr ? qr->GetError() : "SELECT 1 returned no result");
 			return;
 		}
 	} catch (const std::exception &ex) {
-		RespondError(res, 503, "NOT_READY", ex.what());
+		fail_quiet(ex.what());
 		return;
 	}
 	res.status = 200;
@@ -609,10 +630,15 @@ void AdminHandlers::HandleCheckpoint(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 
-	// Body is optional; if present it must be JSON. Allow missing body
-	// (Content-Length: 0) — checkpoint with no args is the common case.
+	// PR-6 follow-up (round 19): if the request advertises a Content-Type
+	// at all, validate AND drain the body — chunked transfer encoding
+	// (no Content-Length) was previously skipping both checks.
+	// Otherwise (truly empty POST: no Content-Type, no Content-Length)
+	// allow the no-args common case without ceremony.
 	auto content_length_header = req.get_header_value("Content-Length");
-	bool has_body = !content_length_header.empty() && content_length_header != "0";
+	auto content_type_header = req.get_header_value("Content-Type");
+	bool has_body =
+	    (!content_length_header.empty() && content_length_header != "0") || !content_type_header.empty();
 	if (has_body) {
 		if (!HasJsonContentType(req)) {
 			RespondError(res, 415, "UNSUPPORTED_MEDIA_TYPE", "/checkpoint expects Content-Type: application/json");
