@@ -4,9 +4,9 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-15 17:30 MDT
-**Last fully merged `main`:** `4203d73` — PR-5: add JSON `/sql` endpoint with NDJSON streaming (#11)
-**Active branch:** `pr12-rename-harbor`
+**Last updated:** 2026-05-15 21:55 MDT
+**Last fully merged `main`:** `a03fbc9` — PR-12: rename duckdb-flock to duckdb-harbor (#12)
+**Active branch:** none yet — PR-6 (admin handlers) is the next planned PR; branch `pr6-admin-handlers` will be created off `main` when work begins.
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -41,74 +41,16 @@ Latest merged chain:
 | PR-10a | merged | Docs: v0.1 UI assets = proxy/disabled; bundled deferred to v0.2. |
 | PR-11 | merged | Docs: cancelled PR-10b migration; strengthened why `curl` is required. |
 | PR-5 | merged | JSON `/sql` endpoint, NDJSON streaming, principal-owned sessions, golden tests. |
+| PR-12 | merged | Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Build identity, source tree, SQL surface, HTTP cookie/headers, env vars, scripts, and docs all moved to `harbor`. Quack wire compat preserved. |
 
-All merged PRs were green on the 7-target CI matrix at merge time.
-
-## Active work: PR-12 (project rename)
-
-### Scope
-
-Pre-v0.1 project rename: `duckdb-flock` → `duckdb-harbor`. Mechanical
-rename across build identifiers, source tree, SQL surface, HTTP
-cookie/headers, env vars, scripts, and docs. **No runtime behavior
-change beyond the intentional public rename.**
-
-Quack compatibility intentionally preserved:
-
-- `/quack` route, wire format, and `X-Quack-Protocol-Version` header.
-- `quack:` URI scheme accepted alongside the new canonical `harbor:`.
-- `quack_*` SQL functions and settings retained as compatibility
-  aliases; `harbor_*` is now the primary surface.
-- `src/quack/` source tree, `QuackMessage`, `QuackHandlers`,
-  `QuackLogType` all unchanged.
-- Storage extension registered under both `"harbor"` and `"quack"`
-  type keys; canonical listener identity stays `quack:host:port` so
-  start/stop calls match across schemes.
-
-Auth resolution order: Harbor settings → Quack settings (compat) →
-built-in default.
-
-### Local verification
-
-```bash
-make release            # artifact: build/release/extension/harbor/harbor.duckdb_extension
-make test_release       # 43/43 assertions
-scripts/golden-cookie-auth.sh    # 14/14, including PR-8 credential strip on X-Harbor-* / harbor_session
-scripts/golden-sql-roundtrip.sh  # all assertions
-```
-
-Smoke tests confirm:
-
-- `LOAD harbor; SELECT harbor_version();` works.
-- `harbor_check_token`, `harbor_nop_authorization`, `harbor_uri_parser`
-  registered.
-- `harbor_serve('harbor:127.0.0.1:N')` followed by
-  `harbor_stop('quack:127.0.0.1:N')` works (canonical-id matching
-  across schemes).
-- `quack_serve('quack:...')`, `quack_query(...)`, `quack_stop('harbor:...')`
-  all work (full Quack-side compat).
-- `ATTACH 'harbor:127.0.0.1:N' AS h (TYPE harbor, TOKEN '...');
-   SELECT * FROM h.query('SELECT 99 AS x')` works.
-
-Repo-wide grep on tracked files (excluding `duckdb/`,
-`extension-ci-tools/`, `misc/`, `build/`) for `flock|Flock|FLOCK|
-flock_session|X-Flock|__FLOCK|flock:|duckdb-flock`: zero hits.
-
-### Commit / PR workflow
-
-Single squash-friendly commit, branch off `main`, full 7-target CI
-matrix runs against the rename before merge.
-
-```bash
-git switch -c pr12-rename-harbor
-git add -A
-git commit -m "PR-12: rename duckdb-flock to duckdb-harbor"
-git push -u origin pr12-rename-harbor
-gh pr create ...
-```
-
-Wait for all 7 CI checks + `architecture-guard` to go green, then
-squash-merge.
+All merged PRs were green on every CI check at merge time. The current
+CI matrix runs five build targets (Linux `linux_amd64`, MacOS
+`osx_arm64`, Windows `windows_amd64`, Windows `windows_amd64_mingw`,
+DuckDB-Wasm `wasm_mvp`) plus a matrix-generation step plus the
+`architecture-guard` (single `duckdb_httplib::Server` owner) check
+— seven total checks per push. `osx_amd64` and `linux_arm64` are
+intentionally excluded by `reduced_ci_mode: enabled`; PR-7+ revisits
+the full matrix.
 
 ## Up next: PR-6 (admin handlers)
 
@@ -150,21 +92,18 @@ into SQL or into the `__HARBOR_ADMIN__:` policy string.
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb`
-3. Confirm branch — `pr12-rename-harbor` if rename PR is still in flight,
-   `main` after merge.
-4. If rename PR is merged and you are starting PR-6, branch off latest
-   `main`:
+2. `git status -sb` — should show `main` clean and at `a03fbc9` or later.
+3. Branch off `main` for the next PR:
    ```bash
    git switch main
    git pull --ff-only
    git switch -c pr6-admin-handlers
    ```
-5. Run:
+4. Run a fresh sanity build:
    ```bash
    make release
    make test_release
    scripts/golden-cookie-auth.sh
    scripts/golden-sql-roundtrip.sh
    ```
-6. Confirm all green before starting new work.
+5. Confirm all green before starting new work.
