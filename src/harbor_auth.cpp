@@ -422,11 +422,18 @@ AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Reques
 		string token = raw_value;
 		if (source == AuthSource::kBearer) {
 			// "Bearer <token>" — case-sensitive scheme per RFC 6750.
+			// PR-7c (round-23 review): non-Bearer schemes return
+			// UNSUPPORTED_AUTH_SCHEME (distinct from MISSING_CREDENTIAL,
+			// which means "no Authorization header AND no X-Harbor-Token
+			// AND no cookie"). The handler maps both to 401 but the
+			// errorCode tells operator tooling whether they sent the
+			// wrong scheme (e.g. accidentally Basic on a misconfigured
+			// reverse proxy) vs forgot the credential entirely.
 			constexpr const char *kBearerPrefix = "Bearer ";
 			constexpr size_t kBearerPrefixLen = 7;
 			if (token.size() < kBearerPrefixLen ||
 			    token.compare(0, kBearerPrefixLen, kBearerPrefix) != 0) {
-				ar.error_code = "MISSING_CREDENTIAL";
+				ar.error_code = "UNSUPPORTED_AUTH_SCHEME";
 				return ar;
 			}
 			token = TrimAscii(token.substr(kBearerPrefixLen));

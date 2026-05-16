@@ -240,8 +240,20 @@ void AuthHandlers::HandleLogin(const duckdb_httplib_openssl::Request &req,
 	string token;
 	auto auth_header = req.get_header_value("Authorization");
 	auto x_harbor = req.get_header_value("X-Harbor-Token");
-	if (!auth_header.empty() && auth_header.size() > 7 &&
-	    auth_header.compare(0, 7, "Bearer ") == 0) {
+	// PR-7c (round-23): if Authorization is present at all, it MUST be
+	// Bearer. A non-Bearer scheme (`Basic`, `Digest`, `Negotiate`, etc.)
+	// returns UNSUPPORTED_AUTH_SCHEME without falling through to
+	// X-Harbor-Token or the JSON body — consistent with
+	// AuthManager::AuthenticateRequest's "explicit-bad credential
+	// must not be masked by ambient state" rule (round-11). A
+	// misconfigured reverse proxy that injects `Authorization: Basic`
+	// upstream would otherwise silently invalidate any login flow.
+	if (!auth_header.empty()) {
+		if (auth_header.size() < 7 || auth_header.compare(0, 7, "Bearer ") != 0) {
+			WriteJsonError(res, 401, "UNSUPPORTED_AUTH_SCHEME",
+			               "unsupported Authorization scheme — only Bearer is accepted");
+			return;
+		}
 		token = TrimCopy(auth_header.substr(7));
 	} else if (!x_harbor.empty()) {
 		token = TrimCopy(x_harbor);
