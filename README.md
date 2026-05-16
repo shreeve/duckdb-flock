@@ -14,37 +14,42 @@ session pool and auth model.
 > rebase to DuckDB v2.0 GA when it lands. The full design is in
 > [`SPEC.md`](./SPEC.md).
 >
-> **Implementation status:** This README describes the v0.1 *target*.
-> The repo is being implemented in staged PRs (see [`AGENTS.md`](./AGENTS.md)
-> "Implementation roadmap"). What works as of `main` today: PR-1
-> vendored `duckdb-quack` and built it as `harbor.duckdb_extension`;
-> PR-1.5 added a `/quack` runtime roundtrip test; PR-2 extracted the
-> shared `HarborHttpServer` + `harbor_serve` / `harbor_stop` / `harbor_wait`
-> lifecycle + `/health` and `/info`; PR-3 vendored `duckdb-ui` and wired
-> `UiHandlers` against the shared server (`/ddb/*`, `/localEvents`,
-> `/localToken`, GET `/.*` proxy to `ui.duckdb.org`); **PR-4** added
-> HMAC-signed `harbor_session` cookie auth (`POST /auth/login` /
-> `POST /auth/logout`), the SPEC §7 cookie-aware gate on `/ddb/*`
-> + `/localEvents` + the UI catch-all, principal-scoped UI connection
-> pool, and the `harbor_cors_origins` allow-list (replaces the wildcard
-> CORS on `/info` and `/quack`; `harbor_serve` refuses to start on
-> `'*'`). The cookie signing key is **ephemeral random per process**
-> in v0.1 — restart logs everyone out, by design (see SPEC §7).
+> **Implementation status:** v0.1 implementation chain merged on `main`.
+> Highlights:
 >
-> The browser flow now: open `http://localhost:9494/`, paste the token
+> - **PR-1 / PR-1.5**: Vendored `duckdb-quack` as `harbor.duckdb_extension`;
+>   `/quack` runtime roundtrip regression baseline.
+> - **PR-2**: `HarborHttpServer` shared, `harbor_serve` / `_stop` / `_wait`
+>   lifecycle, `/health`, `/info`.
+> - **PR-3**: Vendored `duckdb-ui`; `UiHandlers` (`/ddb/*`, `/localEvents`,
+>   `/localToken`, GET `/.*` proxy to `ui.duckdb.org`).
+> - **PR-4**: `harbor_crypto` (OpenSSL libcrypto wrapper); HMAC-signed
+>   `harbor_session` cookie + `/auth/login` + `/auth/logout`; cookie-gated
+>   UI catch-all, `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`,
+>   `/localEvents`; principal-scoped UI connection pool;
+>   `harbor_cors_origins` allow-list. Cookie signing key is **ephemeral
+>   random per process** in v0.1.
+> - **PR-5**: JSON `/sql` endpoint with NDJSON streaming, one-shot JSON
+>   mode, prepared-parameter binding, principal-owned `/sql/sessions`,
+>   `OPTIONS /sql` CORS preflight.
+> - **PR-6**: Admin handlers (`/ready`, `/whoami`, `/tables`,
+>   `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`,
+>   `/sql/cancel`). Centralized `__HARBOR_ADMIN__:resource:action`
+>   default-deny + `harbor_allow_admin_without_authz` operator opt-in.
+> - **PR-7a–e**: v0.1 hardening series — full CI matrix (9 platforms),
+>   `harbor_query_timeout_s` runtime enforcement, `Authorization`
+>   scheme tightening + login-page CSP+nonce, full nested-type Mode B
+>   param parser (LIST / ARRAY / STRUCT / MAP), comprehensive
+>   per-DuckDB-type `/sql` encoding round-trip (62 type assertions).
+>
+> The browser flow: open `http://localhost:9494/`, paste the token
 > printed by `harbor_serve()`, the page POSTs to `/auth/login`, sets a
 > `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
 > request proxies through to `ui.duckdb.org`. For local dev only,
 > `SET GLOBAL harbor_local_dev_mode = true` (with bind on loopback)
 > skips the token-paste step and uses a synthetic
 > `sha256("__HARBOR_LOCAL_DEV__")` principal so the connection-pool
-> isolation invariant still holds; **PR-5** added the JSON `/sql`
-> endpoint (`POST /sql`) with NDJSON streaming, one-shot JSON mode,
-> prepared-parameter binding, explicit SQL sessions, per-principal
-> session ownership checks, and `OPTIONS /sql` CORS preflight.
->
-> Still pending: admin handlers (PR-6). Examples below describe the
-> eventual admin API.
+> isolation invariant still holds.
 
 ## Quick Start
 
