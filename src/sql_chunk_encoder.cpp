@@ -115,10 +115,16 @@ std::string TimestampTzToIsoUtc(timestamp_t ts) {
 // internal storage normalizes to micros; converting back to the
 // original precision requires knowing the source type.
 std::string TimestampSecToIso(timestamp_t ts) {
-	// DuckDB stores TIMESTAMP_S as seconds; Timestamp::ToString prints
-	// micros precision. Truncate any fractional part by stripping
-	// everything after a '.' if present.
-	auto s = TimestampToIsoNaive(ts);
+	// PR-7e fix: DuckDB stores TIMESTAMP_S internally as int64 SECONDS
+	// since epoch (the timestamp_t bit pattern IS that integer), but
+	// Timestamp::ToString interprets its argument as MICROSECONDS since
+	// epoch. Without conversion, a TIMESTAMP_S of 1778683496 seconds
+	// (2026-05-16) renders as 1778683496 micros (1970-01-01 00:29:38).
+	// Convert to canonical-micros via Timestamp::FromEpochSeconds.
+	auto canonical = Timestamp::FromEpochSeconds(ts.value);
+	auto s = TimestampToIsoNaive(canonical);
+	// TIMESTAMP_S has zero fractional precision per SPEC §5.4;
+	// strip any fraction the formatter may have added.
 	auto dot = s.find('.');
 	if (dot != std::string::npos) {
 		s.resize(dot);
@@ -127,7 +133,11 @@ std::string TimestampSecToIso(timestamp_t ts) {
 }
 
 std::string TimestampMsToIso(timestamp_t ts) {
-	auto s = TimestampToIsoNaive(ts);
+	// PR-7e fix: TIMESTAMP_MS is int64 MILLISECONDS since epoch in the
+	// timestamp_t bit pattern. Convert via Timestamp::FromEpochMs to
+	// canonical micros before calling the formatter.
+	auto canonical = Timestamp::FromEpochMs(ts.value);
+	auto s = TimestampToIsoNaive(canonical);
 	auto dot = s.find('.');
 	if (dot != std::string::npos) {
 		// Keep up to 3 digits of fraction.
