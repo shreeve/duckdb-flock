@@ -1,10 +1,25 @@
 # Main extension distribution pipeline.
 #
-# PR-1: scaffold only. Builds linux_amd64 via the reduced-CI matrix to
-# keep iteration fast while we vendor and rename quack. The full
-# osx_arm64 / osx_amd64 / linux_arm64 / windows_amd64 matrix lights up
-# in PR-2 (HarborHttpServer skeleton) or PR-3 (UI port) per the
-# AGENTS.md "Implementation roadmap".
+# Builds the harbor extension across the full upstream non-opt-in
+# matrix exposed by extension-ci-tools v1.5-variegata
+# (config/distribution_matrix.json). With `reduced_ci_mode: 'disabled'`
+# (PR-7a) the matrix is:
+#
+#   linux:   linux_amd64, linux_arm64
+#   osx:     osx_amd64, osx_arm64
+#   windows: windows_amd64, windows_amd64_mingw
+#   wasm:    wasm_mvp, wasm_eh, wasm_threads
+#
+# That's 9 build targets + matrix-generate + the architecture-guard
+# (single duckdb_httplib::Server owner) = 11 total CI rows.
+#
+# Pre-PR-7a we ran `reduced_ci_mode: 'enabled'` (5 build targets:
+# linux_amd64, osx_arm64, windows_amd64, windows_amd64_mingw, wasm_mvp)
+# while iterating on the protocol surface (PR-1 through PR-6/6.1).
+# That kept feedback fast but left linux_arm64, osx_amd64, wasm_eh,
+# and wasm_threads uncovered. PR-7a flips the mode to 'disabled' so
+# every PR after this one runs against the full matrix before merging
+# — catching arch-specific regressions BEFORE they reach v0.1 release.
 #
 # Adapted from duckdb-quack's MainDistributionPipeline.yml; same
 # structure, same pinned ci_tools_version, same calling convention.
@@ -27,4 +42,4 @@ jobs:
       duckdb_version: v1.5.2
       ci_tools_version: v1.5-variegata
       extension_name: harbor
-      reduced_ci_mode: 'enabled'
+      reduced_ci_mode: 'disabled'

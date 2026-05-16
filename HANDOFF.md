@@ -6,7 +6,7 @@
 
 **Last updated:** 2026-05-16 00:30 MDT
 **Last fully merged `main`:** `433692e` — PR-6 follow-up: post-merge review (rounds 19+20) — security + correctness fixes (#14)
-**Active branch:** none yet — PR-7 (hardening) is the next planned PR; branch `pr7-hardening` will be created off `main` when work begins.
+**Active branch:** `pr7a-full-ci-matrix` (CI-matrix flip; first of the PR-7-series hardening PRs).
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -49,22 +49,27 @@ Latest merged chain:
 | PR-6 | merged | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`). Centralized `__HARBOR_ADMIN__:` default-deny in `AuthManager::RunAuthorization` (detected by setting presence — robust against aliased fn names) with `harbor_allow_admin_without_authz` operator opt-in. `HarborSession` instrumented (`created_at`/`last_query`/`query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. New `golden-admin-roundtrip.sh` (26 assertions across three lifecycles: default-deny, admin-bypass, custom authz fn). |
 | PR-6.1 (#14) | merged | Post-merge security + correctness follow-up surfaced by GPT-5.5 round 19 and signed off in round 20. Fixed: (a) **default-deny fail-open** when operator explicitly set `harbor_authorization_function` / `quack_authorization_function` to a built-in nop name (security); the `IsBuiltinNopAuthz` normalizer now lower-cases, strips whitespace, and strips a leading schema-qualifier prefix before comparison. (b) **RNG TOCTOU** in `SessionManager::GenerateSessionId` (correctness; lock now held across init + `GenerateRandomData`). (c) **`/ready` info leak** — bare `{"ok":false}` 503 with no DuckDB error detail. (d) Tighter `Content-Type: application/json` parser (rejects `application/jsonjunk`; only `;` is the standard MIME parameter separator). (e) `/checkpoint` body validation now fires on chunked transfer encoding too. Golden coverage extended (26 → 31 assertions) with regression guards for explicit-nop, mixed-case-nop, schema-qualified-nop, and the tighter Content-Type. |
 
-All merged PRs were green on every CI check at merge time. The current
-CI matrix runs five build targets (Linux `linux_amd64`, MacOS
-`osx_arm64`, Windows `windows_amd64`, Windows `windows_amd64_mingw`,
-DuckDB-Wasm `wasm_mvp`) plus a matrix-generation step plus the
-`architecture-guard` (single `duckdb_httplib::Server` owner) check
-— seven total checks per push. `osx_amd64` and `linux_arm64` are
-intentionally excluded by `reduced_ci_mode: enabled`; PR-7 revisits
-the full matrix.
+All merged PRs were green on every CI check at merge time. With
+PR-7a's flip of `reduced_ci_mode: 'enabled'` → `'disabled'`, the
+matrix now runs nine build targets per push:
+
+- Linux: `linux_amd64`, `linux_arm64`
+- MacOS: `osx_amd64`, `osx_arm64`
+- Windows: `windows_amd64`, `windows_amd64_mingw`
+- Wasm: `wasm_mvp`, `wasm_eh`, `wasm_threads`
+
+Plus the matrix-generation step plus the `architecture-guard`
+(single `duckdb_httplib::Server` owner) check — eleven total CI
+rows per push. The `*_musl` and `windows_arm64` targets remain
+opt-in only.
 
 ## Up next: PR-7 (hardening)
 
 Per `AGENTS.md` Implementation roadmap, the remaining v0.1 work is
 hardening:
 
-- Flip `reduced_ci_mode: 'enabled'` off; add `osx_amd64` + `linux_arm64`
-  to the matrix (currently 5 platforms; target is the full 7).
+- ~~Flip `reduced_ci_mode: 'enabled'` off~~ — landing in PR-7a
+  (active branch `pr7a-full-ci-matrix`).
 - `harbor_query_timeout_s` runtime enforcement (setting is in SPEC,
   but the executor-side interrupt-after-N-seconds wiring is PR-7).
 - Default-deny on unknown `Authorization:` schemes (today
