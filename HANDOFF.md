@@ -4,9 +4,9 @@
 > are removed because they are merged. Read this file after `AGENTS.md`
 > and `SPEC.md` if resuming work mid-PR.
 
-**Last updated:** 2026-05-16 03:40 MDT
-**Last fully merged `main`:** `96192e0` — PR-7a: flip CI matrix from reduced (5 platforms) to full (9 build targets) (#15)
-**Active branch:** none yet — PR-7b (`harbor_query_timeout_s` runtime enforcement) is the next planned PR; branch will be created off `main` when work begins.
+**Last updated:** 2026-05-16 12:46 MDT
+**Last fully merged `main`:** `3195c8e` — PR-7b: harbor_query_timeout_s runtime enforcement (#16)
+**Active branch:** none yet — PR-7c (default-deny on unknown `Authorization:` schemes + login-page CSP+nonce) is the next planned PR; branch `pr7c-auth-csp` will be created off `main` when work begins.
 **Project repo:** `/Users/shreeve/Data/Code/duckdb-harbor` · GitHub `shreeve/duckdb-harbor`
 **GPT-5.5 conversation id:** `duckdb-flock-spec` (kept from before the rename — references the project as Harbor going forward)
 
@@ -49,6 +49,7 @@ Latest merged chain:
 | PR-6 | merged | Admin handlers (`/ready`, `/whoami`, `/tables`, `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`, `/sql/cancel`). Centralized `__HARBOR_ADMIN__:` default-deny in `AuthManager::RunAuthorization` (detected by setting presence — robust against aliased fn names) with `harbor_allow_admin_without_authz` operator opt-in. `HarborSession` instrumented (`created_at`/`last_query`/`query_in_flight`); `SessionManager::Snapshot()` + `InterruptSession()`. CSRF + `Content-Type: application/json` + body-limit on every mutating admin POST. `/schema` uses `duckdb_columns()` with bound parameters — path identifiers never SQL-interpolated. New `golden-admin-roundtrip.sh` (26 assertions across three lifecycles: default-deny, admin-bypass, custom authz fn). |
 | PR-6.1 (#14) | merged | Post-merge security + correctness follow-up surfaced by GPT-5.5 round 19 and signed off in round 20. Fixed: (a) **default-deny fail-open** when operator explicitly set `harbor_authorization_function` / `quack_authorization_function` to a built-in nop name (security); the `IsBuiltinNopAuthz` normalizer now lower-cases, strips whitespace, and strips a leading schema-qualifier prefix before comparison. (b) **RNG TOCTOU** in `SessionManager::GenerateSessionId` (correctness; lock now held across init + `GenerateRandomData`). (c) **`/ready` info leak** — bare `{"ok":false}` 503 with no DuckDB error detail. (d) Tighter `Content-Type: application/json` parser (rejects `application/jsonjunk`; only `;` is the standard MIME parameter separator). (e) `/checkpoint` body validation now fires on chunked transfer encoding too. Golden coverage extended (26 → 31 assertions) with regression guards for explicit-nop, mixed-case-nop, schema-qualified-nop, and the tighter Content-Type. |
 | PR-7a (#15) | merged | Flipped `reduced_ci_mode: 'enabled'` → `'disabled'` so every PR runs against the full upstream non-opt-in matrix BEFORE merging. Matrix went from 5 to 9 build targets per push: Linux (amd64 + arm64), MacOS (amd64 + arm64), Windows (amd64 + amd64_mingw), Wasm (mvp + eh + threads). All four new platforms (`linux_arm64`, `osx_amd64`, `wasm_eh`, `wasm_threads`) passed on first try with zero source changes. First of the PR-7-series focused hardening PRs (split from the original "PR-7 omnibus" so each concern is reviewable independently). |
+| PR-7b (#16) | merged | `harbor_query_timeout_s` runtime enforcement. Sweeper thread (250ms tick, generation-versioned race-fix) interrupts overdue SessionManager-tracked queries; per-request RAII `QueryTimeoutWatchdog` (clean cv-driven join, never detached) handles ephemeral `/sql` + transient admin/UI connections. `InterruptCause` enum classifies TIMEOUT/USER_CANCEL/DISCONNECT so the catch path emits HTTP 504 + `errorCode: "QUERY_TIMEOUT"` (pre-response) or mid-stream `{"type":"error","code":"QUERY_TIMEOUT"\|"QUERY_CANCELLED"}` (NDJSON streaming, status frozen per SPEC §5.2). Wired in 5 call sites: SqlHandlers (sessionful + ephemeral + streaming guard transfer), QuackHandlers PREPARE/APPEND/FETCH, AdminHandlers /tables/schema/checkpoint, UiHandlers /ddb/run. R-21 design review caught generation counter race-fix; R-22 post-impl caught streaming-USER_CANCEL fake-natural-end bug; PR-7a's full 9-platform CI caught a Windows MSVC most-vexing-parse before merge. New `golden-query-timeout.sh` (10 assertions across 3 server lifecycles incl. generation-race regression guard). |
 
 All merged PRs were green on every CI check at merge time. With
 PR-7a's flip of `reduced_ci_mode: 'enabled'` → `'disabled'`, the
@@ -71,10 +72,8 @@ is reviewable independently. PR-7a (CI matrix flip) is merged; the
 remaining items in dependency order:
 
 - ~~PR-7a: flip `reduced_ci_mode: 'enabled'` off~~ — **merged** as `96192e0`.
-- **PR-7b (next): `harbor_query_timeout_s` runtime enforcement** — the
-  setting is already in SPEC and registered, but the executor-side
-  interrupt-after-N-seconds wiring is PR-7b.
-- **PR-7c**: Default-deny on unknown `Authorization:` schemes (today
+- ~~PR-7b: `harbor_query_timeout_s` runtime enforcement~~ — **merged** as `3195c8e`.
+- **PR-7c (next)**: Default-deny on unknown `Authorization:` schemes (today
   `Authorization: Basic …` falls through to cookie/X-Harbor-Token; should
   explicitly reject anything that isn't `Bearer`) + login-page CSP + nonce.
 - **PR-7d**: Full nested-type Mode B param parser for `/sql`
@@ -106,19 +105,20 @@ that worked for PR-5 and PR-6.
 ## If resuming after a reconnect
 
 1. `cd /Users/shreeve/Data/Code/duckdb-harbor`
-2. `git status -sb` — should show `main` clean and at `96192e0` or later.
+2. `git status -sb` — should show `main` clean and at `3195c8e` or later.
 3. Branch off `main` for the next PR:
    ```bash
    git switch main
    git pull --ff-only
-   git switch -c pr7b-query-timeout
+   git switch -c pr7c-auth-csp
    ```
 4. Run a fresh sanity build:
    ```bash
    make release
-   make test_release                  # 44/44
+   make test_release                  # 45/45
    scripts/golden-cookie-auth.sh      # 14/14
    scripts/golden-sql-roundtrip.sh    # 19/19
    scripts/golden-admin-roundtrip.sh  # 31/31
+   scripts/golden-query-timeout.sh    # 10/10
    ```
 5. Confirm all green before starting new work.
