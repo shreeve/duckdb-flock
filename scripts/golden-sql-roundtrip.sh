@@ -271,4 +271,139 @@ code="$(curl -s -o /tmp/harbor-sql-session-destroyed.json -w '%{http_code}' \
 pass "logout destroy_sessions removes owned SQL sessions"
 
 echo
+# ============================================================================
+# PR-7d — full nested-type Mode B param parser (LIST/ARRAY/STRUCT/MAP)
+# ============================================================================
+
+# LIST<INTEGER> with nulls
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"LIST<INTEGER>","value":[1,2,null]}]}')"
+echo "${RESP}" | grep -q '"data":\[\[\[1,2,null\]\]\]' || fail "PR-7d LIST<INTEGER>: ${RESP}"
+pass "PR-7d Mode B LIST<INTEGER> with null element"
+
+# Nested LIST<LIST<VARCHAR>>
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"LIST<LIST<VARCHAR>>","value":[["a"],["b","c"]]}]}')"
+echo "${RESP}" | grep -q '\[\["a"\],\["b","c"\]\]' || fail "PR-7d nested LIST: ${RESP}"
+pass "PR-7d Mode B nested LIST<LIST<VARCHAR>>"
+
+# ARRAY<INTEGER, 3>
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"ARRAY<INTEGER, 3>","value":[10,20,30]}]}')"
+echo "${RESP}" | grep -q '\[10,20,30\]' || fail "PR-7d ARRAY<INTEGER,3>: ${RESP}"
+pass "PR-7d Mode B ARRAY<INTEGER, 3>"
+
+# ARRAY length mismatch → BAD_REQUEST
+code="$(curl -s -o /tmp/harbor-sql-arr-bad.json -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"ARRAY<INTEGER, 3>","value":[1,2]}]}')"
+[[ "${code}" == "400" ]] || fail "PR-7d ARRAY length mismatch expected 400 (got ${code})"
+grep -q '"errorCode":"BAD_REQUEST"' /tmp/harbor-sql-arr-bad.json \
+    || fail "PR-7d ARRAY length mismatch missing BAD_REQUEST errorCode"
+pass "PR-7d ARRAY length mismatch → 400 BAD_REQUEST"
+
+# STRUCT(a INTEGER, b VARCHAR, c LIST<DOUBLE>) with nested LIST
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(a INTEGER, b VARCHAR, c LIST<DOUBLE>)","value":{"a":1,"b":"hi","c":[1.5,2.5]}}]}')"
+echo "${RESP}" | grep -q '"a":1' || fail "PR-7d STRUCT field a: ${RESP}"
+echo "${RESP}" | grep -q '"b":"hi"' || fail "PR-7d STRUCT field b"
+echo "${RESP}" | grep -q '\[1.5,2.5\]' || fail "PR-7d STRUCT field c LIST<DOUBLE>"
+pass "PR-7d Mode B STRUCT with nested LIST<DOUBLE> field"
+
+# Case-insensitive STRUCT field lookup
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(name VARCHAR, age INTEGER)","value":{"NAME":"alice","AGE":30}}]}')"
+echo "${RESP}" | grep -q '"name":"alice"' || fail "PR-7d STRUCT case-insensitive lookup: ${RESP}"
+pass "PR-7d STRUCT case-insensitive field lookup"
+
+# Duplicate STRUCT field (case-insensitive collision) → BAD_REQUEST
+code="$(curl -s -o /tmp/harbor-sql-struct-dup.json -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(a INTEGER)","value":{"A":1,"a":2}}]}')"
+[[ "${code}" == "400" ]] || fail "PR-7d STRUCT duplicate-key expected 400 (got ${code})"
+grep -q 'duplicate field' /tmp/harbor-sql-struct-dup.json \
+    || fail "PR-7d STRUCT duplicate-key error message missing 'duplicate field'"
+pass "PR-7d STRUCT duplicate field (case-insensitive collision) → 400"
+
+# Extra STRUCT field → BAD_REQUEST
+code="$(curl -s -o /tmp/harbor-sql-struct-extra.json -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(a INTEGER)","value":{"a":1,"unexpected":2}}]}')"
+[[ "${code}" == "400" ]] || fail "PR-7d STRUCT extra-key expected 400 (got ${code})"
+grep -q 'unexpected' /tmp/harbor-sql-struct-extra.json \
+    || fail "PR-7d STRUCT extra-key error must mention the bad field name"
+pass "PR-7d STRUCT extra field → 400"
+
+# Missing STRUCT field → NULL (the test value omits 'b')
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(a INTEGER, b VARCHAR)","value":{"a":7}}]}')"
+echo "${RESP}" | grep -q '"a":7' || fail "PR-7d STRUCT missing-field decoded: ${RESP}"
+echo "${RESP}" | grep -q '"b":null' || fail "PR-7d STRUCT missing field 'b' should be null"
+pass "PR-7d STRUCT missing field → NULL (not BAD_REQUEST)"
+
+# MAP<VARCHAR, INTEGER> as array-of-pairs
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"MAP<VARCHAR, INTEGER>","value":[["alpha",1],["beta",2]]}]}')"
+echo "${RESP}" | grep -q '\["alpha",1\]' || fail "PR-7d MAP entry alpha: ${RESP}"
+echo "${RESP}" | grep -q '\["beta",2\]' || fail "PR-7d MAP entry beta"
+pass "PR-7d Mode B MAP<VARCHAR, INTEGER> as array-of-pairs"
+
+# Nested DECIMAL inside STRUCT (round-25 catch: comma in DECIMAL(10,2)
+# must NOT split the STRUCT field list).
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"STRUCT(a DECIMAL(10,2), b INTEGER)","value":{"a":"123.45","b":99}}]}')"
+echo "${RESP}" | grep -q '"a":"123.45"' || fail "PR-7d STRUCT(DECIMAL): ${RESP}"
+echo "${RESP}" | grep -q '"b":99' || fail "PR-7d STRUCT(DECIMAL) sibling field b"
+pass "PR-7d STRUCT(a DECIMAL(10,2), b INTEGER) — comma inside DECIMAL not split"
+
+# UNION explicitly unsupported → BAD_REQUEST with helpful message
+code="$(curl -s -o /tmp/harbor-sql-union.json -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"UNION(a INTEGER, b VARCHAR)","value":1}]}')"
+[[ "${code}" == "400" ]] || fail "PR-7d UNION expected 400 (got ${code})"
+grep -q 'UNION.*not supported' /tmp/harbor-sql-union.json \
+    || fail "PR-7d UNION error must say 'not supported'"
+pass "PR-7d UNION → 400 with explicit not-supported message"
+
+# Whitespace-tolerant type strings (round-25)
+RESP="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d '{"sql":"SELECT $1 AS x","params":[{"type":"LIST < INTEGER >","value":[1,2,3]}]}')"
+echo "${RESP}" | grep -q '\[1,2,3\]' || fail "PR-7d whitespace-tolerant type: ${RESP}"
+pass "PR-7d whitespace-tolerant type strings (LIST < INTEGER >)"
+
 green "All /sql golden assertions passed."
