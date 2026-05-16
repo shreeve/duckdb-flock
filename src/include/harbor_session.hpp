@@ -14,7 +14,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -244,11 +246,56 @@ public:
 	// concurrency-safe — it sets the executor's interrupt flag, which
 	// the in-flight Execute checks at safe yield points).
 	//
+	// `cause` is recorded on the session's `interrupt_cause` atomic
+	// BEFORE Interrupt() is called, so the catch path can classify
+	// whether the interrupt came from /sql/cancel + /interrupt
+	// (USER_CANCEL — the default), a client-disconnect handler
+	// (DISCONNECT), or the timeout sweeper itself (TIMEOUT, which
+	// uses a different code path in TimeoutSweepOnce).
+	//
 	// Used by /interrupt (admin) and /sql/cancel (admin). Both are
 	// authz-gated by the caller; SessionManager itself enforces no
 	// principal ownership check — admin scope deliberately spans
 	// principals.
-	bool InterruptSession(const string &session_id);
+	bool InterruptSession(const string &session_id,
+	                      InterruptCause cause = InterruptCause::USER_CANCEL);
+
+	// PR-7b — single-tick of the timeout sweeper. Iterates the active
+	// session map under the map lock, copies shared_ptrs, releases
+	// the lock, then for each session reads atomics:
+	//
+	//   query_in_flight (true) AND query_deadline_ms != 0 AND
+	//   now_ms > query_deadline_ms
+	//
+	// Sessions matching that predicate get `timed_out_generation`
+	// CAS-set to their CURRENT `query_generation`, and
+	// Connection::Interrupt() is called WITHOUT taking the per-session
+	// lock. The QueryExecutionGuard destructor uses
+	// `timed_out_generation == my_generation` to confirm the cause
+	// was timeout (vs USER_CANCEL or DISCONNECT racing on the same
+	// session) and report TimedOut() = true.
+	//
+	// Exposed publicly so unit tests can drive single-step sweeps
+	// deterministically without depending on the 250ms tick. The
+	// production sweeper thread (StartTimeoutSweeper) calls this in
+	// a loop.
+	void TimeoutSweepOnce();
+
+private:
+	// PR-7b — body of the timeout sweeper thread. Sleeps `tick_ms`
+	// between iterations (or wakes early on shutdown_signal). Calls
+	// TimeoutSweepOnce() each tick. Spawned by StartTimeoutSweeper(),
+	// joined by ~SessionManager().
+	void TimeoutSweepLoop();
+
+	// PR-7b — start the sweeper thread. Idempotent within one
+	// SessionManager instance; called by handler subsystems
+	// (HarborHttpServer wires it during RegisterBuiltinHandlers so
+	// the sweeper is alive only while the server is). Safe to call
+	// even when timeouts are disabled — the loop walks the same
+	// no-deadline atomics and skips them cheaply.
+public:
+	void StartTimeoutSweeper();
 
 private:
 	weak_ptr<DatabaseInstance> db;
@@ -258,6 +305,17 @@ private:
 
 	std::mutex rng_mutex;
 	shared_ptr<EncryptionState> rng;
+
+	// PR-7b — sweeper thread state. `sweeper_thread` is empty when
+	// the sweeper has never been started. `shutdown_requested` flips
+	// true in the destructor; sweeper_cv signals to wake the sweeper
+	// from its wait_for so it can observe the flag and exit cleanly.
+	// `sweeper_started` guards the idempotency of StartTimeoutSweeper().
+	std::thread sweeper_thread;
+	std::mutex sweeper_mutex;
+	std::condition_variable sweeper_cv;
+	bool sweeper_started = false;
+	bool shutdown_requested = false;
 };
 
 } // namespace duckdb

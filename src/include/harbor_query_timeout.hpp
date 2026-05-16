@@ -102,6 +102,13 @@ public:
 	QueryExecutionGuard(const QueryExecutionGuard &) = delete;
 	QueryExecutionGuard &operator=(const QueryExecutionGuard &) = delete;
 
+	// Movable so SqlHandlers can transfer the guard into StreamingCtx
+	// when the response shape is NDJSON streaming and the guard's
+	// lifetime needs to extend past the route lambda. The moved-from
+	// instance has a null `session_ptr` so its destructor is a no-op.
+	QueryExecutionGuard(QueryExecutionGuard &&other) noexcept;
+	QueryExecutionGuard &operator=(QueryExecutionGuard &&other) noexcept;
+
 	// True iff the sweeper marked this guard's generation as timed out.
 	// Safe to call from the catch path; reads atomics only.
 	bool TimedOut() const;
@@ -113,7 +120,9 @@ public:
 	InterruptCause Cause() const;
 
 private:
-	HarborSession &session;
+	// Pointer (not reference) so move-from can null it; reference
+	// would make the type non-movable.
+	HarborSession *session_ptr;
 	uint64_t my_generation;
 };
 

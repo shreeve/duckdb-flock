@@ -11,6 +11,7 @@
 #include "harbor_auth.hpp"
 #include "harbor_crypto.hpp"
 #include "harbor_http_server.hpp"
+#include "harbor_query_timeout.hpp"
 #include "harbor_session.hpp"
 #include "sql_chunk_encoder.hpp"
 #include "sql_json_writer.hpp"
@@ -289,28 +290,28 @@ struct StreamingCtx {
 	bool error_emitted = false;
 	std::chrono::steady_clock::time_point started_at;
 	bool chunk_mode = false;
-	// PR-6: when this StreamingCtx is destroyed (after the chunked
-	// content provider's last invocation, or upon premature failure),
-	// flip the session's query_in_flight signal back to false. The
-	// signal was raised before Execute() in HandleSql.
-	~StreamingCtx() {
-		if (session) {
-			session->query_in_flight.store(false, std::memory_order_release);
+	// PR-7b — query-timeout enforcement for the streaming response.
+	// Exactly one of these is populated based on whether the request
+	// has a SessionManager-tracked session (sessionful → guard) or an
+	// ephemeral Connection (ephemeral → watchdog). Their destructors
+	// run before any other StreamingCtx member, doing the right
+	// cleanup (guard clears query_in_flight + deadline; watchdog
+	// signals done + joins the timer thread). Replaces the PR-6
+	// manual ~StreamingCtx body that only flipped query_in_flight.
+	unique_ptr<QueryExecutionGuard> session_guard;
+	unique_ptr<QueryTimeoutWatchdog> ephemeral_watchdog;
+	// True iff EITHER the session_guard reports timed-out OR the
+	// ephemeral_watchdog reports timed-out. Used by the streaming
+	// provider's catch path to surface QUERY_TIMEOUT in the mid-stream
+	// NDJSON error line vs a generic SQL error.
+	bool TimedOut() const {
+		if (session_guard && session_guard->TimedOut()) {
+			return true;
 		}
-	}
-};
-
-// PR-6 — RAII helper that pairs query_in_flight set-true (at the call
-// site, just before Execute()) with a guaranteed set-false on function
-// scope exit. For the streaming path, ownership of `session` is moved
-// into the StreamingCtx, which then becomes responsible for the reset
-// (see ~StreamingCtx above); the local guard becomes a no-op.
-struct InFlightGuard {
-	shared_ptr<HarborSession> session;
-	~InFlightGuard() {
-		if (session) {
-			session->query_in_flight.store(false, std::memory_order_release);
+		if (ephemeral_watchdog && ephemeral_watchdog->TimedOut()) {
+			return true;
 		}
+		return false;
 	}
 };
 
@@ -541,19 +542,43 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 		return;
 	}
 
-	// PR-6 — record the in-flight query for /sessions visibility.
-	// last_query is mutated under the per-session lock (which we hold
-	// for non-ephemeral sessions; ephemeral sessions are not in the
-	// SessionManager pool and won't appear in Snapshot, so we skip
-	// instrumentation for them entirely). query_in_flight is std::atomic
-	// so /sessions can read it lock-free; reset on function scope exit
-	// via the InFlightGuard, OR on streaming completion via ~StreamingCtx.
-	InFlightGuard in_flight_guard;
+	// PR-7b — guard the in-flight query for /sessions visibility AND
+	// for harbor_query_timeout_s enforcement.
+	//
+	// SessionManager-tracked (non-ephemeral) sessions use
+	// QueryExecutionGuard, which the timeout sweeper observes and
+	// interrupts when the deadline elapses. The guard's destructor
+	// (or ~StreamingCtx, for the streaming path) clears the deadline
+	// + in_flight signal.
+	//
+	// Ephemeral /sql sessions aren't in the SessionManager pool, so
+	// the sweeper can't see them; they get a per-request RAII
+	// QueryTimeoutWatchdog instead, which spawns one std::thread that
+	// waits on a condition_variable until either the deadline elapses
+	// (call Interrupt()) or the destructor signals done (clean exit).
+	uint64_t timeout_seconds = ReadQueryTimeoutSeconds(*db_locked);
+	unique_ptr<QueryExecutionGuard> session_guard;
+	unique_ptr<QueryTimeoutWatchdog> ephemeral_watchdog;
 	if (!resolved.ephemeral && resolved.session) {
-		resolved.session->last_query = parsed.sql;
-		resolved.session->query_in_flight.store(true, std::memory_order_release);
-		in_flight_guard.session = resolved.session;
+		// Caller holds session.lock (acquired earlier via try_to_lock);
+		// safe to construct a QueryExecutionGuard, which mutates
+		// last_query under that lock.
+		session_guard = make_uniq<QueryExecutionGuard>(*resolved.session, parsed.sql, timeout_seconds);
+	} else if (resolved.ephemeral && conn) {
+		ephemeral_watchdog = make_uniq<QueryTimeoutWatchdog>(*conn, timeout_seconds);
 	}
+
+	// Helper closure for "did the right guard observe a timeout?" —
+	// folds the two paths so the catch sites stay readable.
+	auto query_timed_out = [&]() -> bool {
+		if (session_guard && session_guard->TimedOut()) {
+			return true;
+		}
+		if (ephemeral_watchdog && ephemeral_watchdog->TimedOut()) {
+			return true;
+		}
+		return false;
+	};
 
 	auto started_at = std::chrono::steady_clock::now();
 	unique_ptr<QueryResult> result;
@@ -563,11 +588,21 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 		// CreateValue<vector<Value>> and fails the static_assert).
 		result = prepared->Execute(params_out.values);
 	} catch (const std::exception &ex) {
+		if (query_timed_out()) {
+			RespondError(res, 504, "QUERY_TIMEOUT",
+			              "query exceeded harbor_query_timeout_s", parsed.session_id);
+			return;
+		}
 		RespondError(res, 400, ClassifyError(ex.what()), ex.what(), parsed.session_id);
 		return;
 	}
 	if (!result || result->HasError()) {
 		auto msg = result ? result->GetError() : "execute failed";
+		if (query_timed_out()) {
+			RespondError(res, 504, "QUERY_TIMEOUT",
+			              "query exceeded harbor_query_timeout_s", parsed.session_id);
+			return;
+		}
 		RespondError(res, 400, ClassifyError(msg), msg, parsed.session_id);
 		return;
 	}
@@ -618,6 +653,11 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 			try {
 				chunk = result->Fetch();
 			} catch (const std::exception &ex) {
+				if (query_timed_out()) {
+					RespondError(res, 504, "QUERY_TIMEOUT",
+					              "query exceeded harbor_query_timeout_s", parsed.session_id);
+					return;
+				}
 				RespondError(res, 500, ClassifyError(ex.what()), ex.what(), parsed.session_id);
 				return;
 			}
@@ -672,13 +712,15 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	ctx->started_at = started_at;
 	ctx->max_rows = ReadUbigintSetting(db, "harbor_max_response_rows", 0);
 	ctx->chunk_mode = (shape == ResponseShape::kNdjsonChunkMode);
-	// Transfer the in-flight signal ownership to ctx so ~StreamingCtx
-	// flips query_in_flight back to false when the streaming provider
-	// completes (or the shared_ptr<StreamingCtx> is dropped on premature
-	// shutdown). The local InFlightGuard becomes a no-op for the
-	// streaming path; non-streaming returns above us already flipped
-	// the flag back via the local guard's own destructor.
-	in_flight_guard.session.reset();
+	// PR-7b — transfer the timeout guard / watchdog ownership to ctx
+	// so its destructor (running after the streaming provider's last
+	// invocation, or upon premature shutdown) does the cleanup
+	// (sessionful: clear deadline + in_flight; ephemeral: signal
+	// done + join the watchdog thread). The local unique_ptrs become
+	// empty for the streaming path; non-streaming returns above us
+	// already destructed their guards via stack unwinding.
+	ctx->session_guard = std::move(session_guard);
+	ctx->ephemeral_watchdog = std::move(ephemeral_watchdog);
 
 	res.status = 200;
 	res.set_chunked_content_provider("application/x-ndjson", [ctx](size_t /*offset*/,
@@ -703,10 +745,33 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 				// Mid-stream error: emit error line directly in the
 				// catch (round-15 GPT-5.5: don't rely on httplib
 				// calling us back after returning true).
+				// PR-7b — if the timeout sweeper / watchdog interrupted
+				// THIS query (vs a user-issued /sql/cancel or generic
+				// SQL exception), surface the dedicated QUERY_TIMEOUT
+				// errorCode so clients can distinguish.
+				if (ctx->TimedOut()) {
+					EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
+					                        "query exceeded harbor_query_timeout_s");
+					return false;
+				}
 				EmitStreamingErrorSafe(*ctx, sink, ClassifyError(ex.what()), ex.what());
 				return false;
 			}
 			if (!chunk || chunk->size() == 0) {
+				// PR-7b — DuckDB's StreamingQueryResult returns
+				// empty (not an exception) when Connection::Interrupt
+				// fires mid-stream. So an empty chunk could mean
+				// either (a) genuine end of result OR (b) the
+				// sweeper / watchdog interrupted us. Check TimedOut()
+				// first; if true, classify the empty as a timeout
+				// rather than a natural end — otherwise the client
+				// sees `{"type":"end"}` after a partial result and
+				// thinks the query succeeded with fewer rows.
+				if (ctx->TimedOut()) {
+					EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
+					                        "query exceeded harbor_query_timeout_s");
+					return false;
+				}
 				// End of result.
 				auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 				                       std::chrono::steady_clock::now() - ctx->started_at)
@@ -770,6 +835,14 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 			// addition to result->Fetch() failures. Round-16 catch:
 			// the fetch-only catch above was insufficient because
 			// EmitRow/EmitChunk can throw after a chunk is fetched.
+			// PR-7b — same QUERY_TIMEOUT classification as the inner
+			// fetch catch above, in case the timeout interrupts the
+			// encoder mid-row rather than mid-fetch.
+			if (ctx->TimedOut()) {
+				EmitStreamingErrorSafe(*ctx, sink, "QUERY_TIMEOUT",
+				                        "query exceeded harbor_query_timeout_s");
+				return false;
+			}
 			EmitStreamingErrorSafe(*ctx, sink, ClassifyError(ex.what()), ex.what());
 			return false;
 		}

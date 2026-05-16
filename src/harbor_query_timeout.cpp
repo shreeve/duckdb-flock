@@ -68,18 +68,18 @@ int64_t ResolveQueryDeadlineMs(DatabaseInstance &db) {
 // observes a fully-armed deadline.
 
 QueryExecutionGuard::QueryExecutionGuard(HarborSession &session_p, const string &sql, uint64_t timeout_seconds)
-    : session(session_p) {
+    : session_ptr(&session_p) {
 	// Increment the generation FIRST. Sweeper iterations that captured
 	// the prior generation can no longer mark this query as timed-out;
 	// only sweeper iterations that observe THIS generation count.
-	my_generation = session.query_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+	my_generation = session_ptr->query_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
 
 	// Caller holds session.lock; safe to mutate last_query.
-	session.last_query = sql;
+	session_ptr->last_query = sql;
 
 	// Reset prior cause to NONE so a stale USER_CANCEL/DISCONNECT
 	// signal from a previous query doesn't leak into this one.
-	session.interrupt_cause.store(static_cast<uint8_t>(InterruptCause::NONE), std::memory_order_release);
+	session_ptr->interrupt_cause.store(static_cast<uint8_t>(InterruptCause::NONE), std::memory_order_release);
 
 	// Compute and arm deadline (if timeout is enabled).
 	int64_t deadline_ms = 0;
@@ -88,34 +88,62 @@ QueryExecutionGuard::QueryExecutionGuard(HarborSession &session_p, const string 
 		auto when = now + std::chrono::seconds(static_cast<int64_t>(timeout_seconds));
 		deadline_ms = std::chrono::duration_cast<std::chrono::milliseconds>(when.time_since_epoch()).count();
 	}
-	session.query_deadline_ms.store(deadline_ms, std::memory_order_release);
+	session_ptr->query_deadline_ms.store(deadline_ms, std::memory_order_release);
 
 	// Finally flip in_flight true. Sweeper observes (in_flight == true
 	// AND deadline_ms != 0 AND now > deadline_ms) before interrupting.
-	session.query_in_flight.store(true, std::memory_order_release);
+	session_ptr->query_in_flight.store(true, std::memory_order_release);
 }
 
 QueryExecutionGuard::~QueryExecutionGuard() {
+	if (!session_ptr) {
+		return; // moved-from
+	}
 	// Clear deadline + in_flight. Both atomics; the sweeper that
 	// runs between this clear and the next QueryExecutionGuard's ctor
 	// observes deadline=0 and skips.
-	session.query_deadline_ms.store(0, std::memory_order_release);
-	session.query_in_flight.store(false, std::memory_order_release);
+	session_ptr->query_deadline_ms.store(0, std::memory_order_release);
+	session_ptr->query_in_flight.store(false, std::memory_order_release);
 	// Do NOT reset query_generation; it must monotonically grow so
 	// the next guard's ctor produces a strictly-greater value.
 	// Do NOT touch timed_out_generation; the catch-path reader needs
 	// to observe whether it equals my_generation.
 }
 
+QueryExecutionGuard::QueryExecutionGuard(QueryExecutionGuard &&other) noexcept
+    : session_ptr(other.session_ptr), my_generation(other.my_generation) {
+	other.session_ptr = nullptr;
+}
+
+QueryExecutionGuard &QueryExecutionGuard::operator=(QueryExecutionGuard &&other) noexcept {
+	if (this != &other) {
+		// Run our own destructor logic first (release any state we currently own).
+		if (session_ptr) {
+			session_ptr->query_deadline_ms.store(0, std::memory_order_release);
+			session_ptr->query_in_flight.store(false, std::memory_order_release);
+		}
+		session_ptr = other.session_ptr;
+		my_generation = other.my_generation;
+		other.session_ptr = nullptr;
+	}
+	return *this;
+}
+
 bool QueryExecutionGuard::TimedOut() const {
-	return session.timed_out_generation.load(std::memory_order_acquire) == my_generation;
+	if (!session_ptr) {
+		return false;
+	}
+	return session_ptr->timed_out_generation.load(std::memory_order_acquire) == my_generation;
 }
 
 InterruptCause QueryExecutionGuard::Cause() const {
+	if (!session_ptr) {
+		return InterruptCause::NONE;
+	}
 	if (TimedOut()) {
 		return InterruptCause::TIMEOUT;
 	}
-	auto raw = session.interrupt_cause.load(std::memory_order_acquire);
+	auto raw = session_ptr->interrupt_cause.load(std::memory_order_acquire);
 	return static_cast<InterruptCause>(raw);
 }
 
@@ -125,6 +153,8 @@ QueryTimeoutWatchdog::QueryTimeoutWatchdog(Connection &connection_p, uint64_t ti
     : connection(connection_p) {
 	if (timeout_seconds == 0) {
 		// No-op watchdog. No thread spawned; TimedOut() always false.
+		// Caller can construct one unconditionally and pay zero cost
+		// when the timeout setting is disabled.
 		active = false;
 		return;
 	}
@@ -132,32 +162,31 @@ QueryTimeoutWatchdog::QueryTimeoutWatchdog(Connection &connection_p, uint64_t ti
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(static_cast<int64_t>(timeout_seconds));
 	thread = std::thread([this, deadline] {
 		std::unique_lock<std::mutex> lk(mutex);
-		// wait_until returns timeout when the deadline elapses without
-		// `done` being set. cv_status::no_timeout means we were woken
-		// by the destructor — don't fire Interrupt.
-		auto status = cv.wait_until(lk, deadline, [this] { return done; });
-		if (!status) {
-			// `done` was already true at predicate check (destructor
-			// raced ahead of our wait); skip Interrupt.
-			return;
+		// wait_until's predicate form contract: returns true iff the
+		// predicate is true at exit. If the destructor signalled
+		// `done` (either before our wait or by notifying the cv),
+		// the predicate returns true and we skip the Interrupt.
+		// If the deadline elapses without `done` being set, the
+		// predicate returns false → we fire Interrupt.
+		const bool predicate_satisfied = cv.wait_until(lk, deadline, [this] { return done; });
+		if (predicate_satisfied) {
+			return; // destructor woke us — query finished cleanly
 		}
-		// `done` is false → deadline elapsed. (cv.wait_until's predicate
-		// form returns whether the predicate was true at exit; false
-		// means we left because of timeout.)
-		// Note: the std::condition_variable predicate-form contract:
-		//   returns false if predicate still false at deadline; true
-		//   if predicate is true at any point.
-		// We've inverted the test for clarity above. This branch fires
-		// the interrupt.
-		(void)0; // dummy; see issue below
+		// Deadline elapsed with `done` still false. Mark the
+		// timed-out flag and call Interrupt() WITHOUT taking
+		// session locks (Connection::Interrupt is concurrency-safe).
+		timed_out.store(true, std::memory_order_release);
+		// Drop the watchdog mutex before Interrupt() so the destructor
+		// can grab it to set done=true even if Interrupt() is slow.
+		lk.unlock();
+		try {
+			connection.Interrupt();
+		} catch (...) {
+			// Connection::Interrupt() doesn't throw by contract,
+			// but swallow defensively — letting an exception escape
+			// here would std::terminate (we're in a thread).
+		}
 	});
-	// NOTE: the predicate-return-value semantics above are slightly
-	// misstated for clarity; the real wait loop is implemented in the
-	// next commit on this branch when SweeperThread + handler wiring
-	// land. Today's WIP scaffold ALWAYS skips the actual Interrupt()
-	// call so unwired call sites can't accidentally cancel queries
-	// in production. The lock around `done` + `cv.notify_one` in the
-	// destructor still ensures the thread exits cleanly.
 }
 
 QueryTimeoutWatchdog::~QueryTimeoutWatchdog() {
