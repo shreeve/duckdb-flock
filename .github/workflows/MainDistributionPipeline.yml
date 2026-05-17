@@ -25,9 +25,29 @@
 # structure, same pinned ci_tools_version, same calling convention.
 
 name: Main Extension Distribution Pipeline
+# Trigger on every code change. `paths-ignore` keeps pure-docs commits
+# (README, CHANGELOG, the upstream-*-patches notes, .editorconfig,
+# LICENSE) from burning ~30 cross-platform runner-minutes on changes
+# that can't possibly affect the binary. Mixed commits (code + docs)
+# still trigger normally — `paths-ignore` only short-circuits when
+# every changed path matches the list. Workflow-file changes are NOT
+# in the ignore list, so editing this file itself still triggers a
+# rebuild (which is what validates the change).
 on:
   push:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - '.editorconfig'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - '.editorconfig'
+      - 'LICENSE'
   workflow_dispatch:
 
 concurrency:
