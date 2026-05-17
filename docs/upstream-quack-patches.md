@@ -65,20 +65,26 @@ make release && make test_release
 #    "rebase quack to <upstream-commit>"
 ```
 
-## Forward-looking notes
+## Architectural notes
 
-- **PR-2** may collapse the `QuackExtension`/`HarborExtension` delegation,
-  which would change edit #4 from "rename Name() return value" to
-  "delete the QuackExtension class entirely" (`HarborExtension` becomes
-  the canonical class). At that point edits #3 and #5 likely move into
-  the new `HarborExtension` impl in `src/harbor_extension.cpp`, and edit
-  #1 either disappears (entry symbol moves to `src/harbor_extension.cpp`)
-  or stays in `src/quack/quack_extension.cpp` if it survives.
-- **PR-3+** add new harbor-named SQL functions/settings (`harbor_serve`,
-  `harbor_stop`, `harbor_wait`, `harbor_authentication_function` alias,
-  etc.). Those land in harbor-original files (`src/harbor_lifecycle.cpp`
-  etc.), **not** as edits to vendored quack files. The vendored-edit
-  list in this document should stay short.
-- If the vendored-edit list grows beyond ~10 entries, that's a signal
-  that the architectural refactor isn't actually moving us off the
-  vendored substrate. Treat it as a smell.
+- The `QuackExtension` / `HarborExtension` delegation pattern survived
+  through v0.1. `src/harbor_extension.cpp::HarborExtension::Load`
+  still constructs a `QuackExtension` delegate. A future refactor
+  could collapse it (move `LoadInternal`'s body into
+  `src/harbor_extension.cpp`, drop the `QuackExtension` class
+  entirely), at which point edit #4 here disappears, edits #3 and #5
+  move into `HarborExtension`, and edit #1's entry symbol relocates.
+  Not on any v0.1+ roadmap; would just simplify the vendored-edit
+  surface.
+- All harbor-original SQL functions and settings (`harbor_serve`,
+  `harbor_stop`, `harbor_wait`, `harbor_authentication_function`
+  alias, `harbor_cors_origins`, `harbor_query_timeout_s`, etc.)
+  live in harbor-original files (`src/harbor_lifecycle.{cpp,hpp}`,
+  `src/quack/quack_extension.cpp::LoadInternal`'s settings block,
+  etc.) — **not** as edits to vendored quack files. The
+  vendored-edit list in this document is intentionally small and
+  should stay that way.
+- **Smell-check rule:** if the vendored-edit list grows beyond ~10
+  entries, the architectural refactor isn't actually moving us off
+  the vendored substrate. Treat it as a signal to refactor harbor's
+  own files instead of patching upstream's.
