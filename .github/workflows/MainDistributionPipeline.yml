@@ -43,3 +43,67 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: harbor
       reduced_ci_mode: 'disabled'
+
+  # On every tag matching v*, take the per-platform .duckdb_extension(.wasm)
+  # artifacts the matrix produced and attach them to the corresponding
+  # GitHub Release. Each platform's binary lands in the release with a
+  # distinct, platform-tagged filename so users can `wget` the right one
+  # for their machine without unzipping anything.
+  #
+  # The release MUST already exist (gh release create v<X.Y.Z> ahead of
+  # pushing the tag, or use the GitHub UI). This job uploads ASSETS to an
+  # existing release; it does NOT create the release. That keeps release
+  # NOTES under explicit human authorship while binary distribution
+  # automates.
+  #
+  # Implementation note: upstream extension-ci-tools' artifact names are
+  # `<ext>-<duckdb_ver>-extension-<platform>` and contain
+  # `harbor.duckdb_extension` for native platforms,
+  # `harbor.duckdb_extension.wasm` for wasm platforms. We rename to
+  # `harbor.<platform>.duckdb_extension[.wasm]` for end-user clarity in
+  # the release listing.
+  attach-release-binaries:
+    name: Attach platform binaries to GitHub Release
+    needs: duckdb-stable-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all matrix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: harbor-v1.5.2-extension-*
+
+      - name: Flatten + rename per platform
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for dir in artifacts/harbor-v1.5.2-extension-*; do
+            platform="${dir##*-extension-}"
+            if [ -f "$dir/harbor.duckdb_extension" ]; then
+              cp "$dir/harbor.duckdb_extension" \
+                 "release-assets/harbor.${platform}.duckdb_extension"
+            elif [ -f "$dir/harbor.duckdb_extension.wasm" ]; then
+              cp "$dir/harbor.duckdb_extension.wasm" \
+                 "release-assets/harbor.${platform}.duckdb_extension.wasm"
+            else
+              echo "WARN: no extension binary in $dir" >&2
+              ls -la "$dir"
+              exit 1
+            fi
+          done
+          ls -lh release-assets/
+
+      - name: Upload to the GitHub Release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # --clobber so re-runs overwrite cleanly without manual cleanup.
+          gh release upload "$TAG" \
+            release-assets/harbor.*.duckdb_extension* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
