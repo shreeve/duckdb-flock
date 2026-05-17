@@ -86,21 +86,29 @@ sleep 2 && curl -sf -i http://localhost:19495/info | grep X-DuckDB-UI
 #    "rebase ui to <upstream-commit>"
 ```
 
-## Forward-looking notes
+## Architectural notes
 
-- **PR-4** will introduce harbor-specific cookie auth (HMAC-signed
-  `harbor_session` cookie, `POST /auth/login`, harbor login wrapper at
-  `GET /`). At that point `UiHandlers::HandleInterrupt`,
-  `HandleRun`, `HandleTokenize`, `HandleGetLocalToken` will get a
-  cookie-aware auth path that supplements (or replaces) the current
-  Origin-set check. The Origin check itself will become more
-  restrictive (only configured `harbor_cors_origins`).
-- The PR-3 `HandleProxyGet` (was `HandleGet` upstream) does runtime
-  HTTPS proxying to `ui.duckdb.org`. SPEC §8 lists `bundled` mode as
-  a future option (post-v0.1) for air-gapped deployments. When
-  bundled mode lands, `HandleProxyGet` becomes one of two
-  implementations selected at request time by the `harbor_ui_assets`
-  setting.
-- If the vendored-edit list grows beyond ~10 entries, that's a
-  signal that the architectural integration isn't actually moving us
-  off the vendored substrate. Treat it as a smell.
+- Cookie auth (HMAC-signed `harbor_session` cookie, `POST /auth/login`,
+  harbor login wrapper at `GET /`) shipped in v0.1. `HandleInterrupt`,
+  `HandleRun`, `HandleTokenize`, `HandleGetLocalToken`, and
+  `/localEvents` all run a cookie-aware auth path through
+  `AuthorizeUiRequest()` that supplements the Origin-set check; the
+  Origin check uses the `harbor_cors_origins` allow-list. PR-7c added
+  Content-Security-Policy + per-request CSPRNG nonce on the login
+  page itself.
+- `HandleProxyGet` does runtime HTTPS proxying to `ui.duckdb.org` over
+  the cpp-httplib OpenSSL HTTPS client. PR-8 hardened it to strip
+  every harbor credential header (`Cookie`, `Authorization`,
+  `X-Harbor-*`, `Origin`, `Sec-*`) before forwarding upstream, with a
+  positive allow-list of asset-fetch headers (`Accept`,
+  `Accept-Encoding`, `Accept-Language`, `If-None-Match`,
+  `If-Modified-Since`, `Range`).
+- **Bundled UI assets mode is genuinely post-v0.1.** SPEC §8 reserves
+  it for air-gapped deployments. When it lands, `HandleProxyGet`
+  becomes one of two implementations selected at request time by a
+  `harbor_ui_assets` setting; the proxy implementation here stays as
+  the other branch. No code or setting exists for this yet.
+- **Smell-check rule:** if the vendored-edit list grows beyond ~10
+  entries, the architectural integration isn't actually moving us
+  off the vendored substrate. Treat it as a signal to refactor
+  harbor's own files instead of patching upstream's.
