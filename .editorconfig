@@ -1,0 +1,49 @@
+# EditorConfig — https://editorconfig.org
+# Match the conventions already in the repo. Don't reformat existing
+# files; this just keeps new contributions consistent.
+
+root = true
+
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8
+trim_trailing_whitespace = true
+
+# C++ / CMake — tabs, like upstream duckdb-quack and duckdb-ui.
+[*.{cpp,hpp,h,c}]
+indent_style = tab
+indent_size = 4
+
+[CMakeLists.txt]
+indent_style = space
+indent_size = 4
+
+[*.cmake]
+indent_style = space
+indent_size = 4
+
+# Shell scripts.
+[*.sh]
+indent_style = space
+indent_size = 2
+
+# Markdown — preserve trailing whitespace (it's significant for line breaks).
+[*.md]
+trim_trailing_whitespace = false
+indent_style = space
+indent_size = 2
+
+# YAML.
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# JSON.
+[*.json]
+indent_style = space
+indent_size = 2
+
+# Makefile MUST use tabs for recipe lines.
+[{Makefile,*.Makefile}]
+indent_style = tab
