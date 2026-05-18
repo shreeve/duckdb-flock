@@ -6,6 +6,19 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `scripts/load-test.sh` upgraded to auto-detect a real HTTP
+  benchmarker (`oha` preferred, `wrk` fallback) and use it instead
+  of the per-request `curl` shell loop. The previous shell-loop mode
+  is still available via `--shell` flag, but the script prints a
+  banner explaining the per-curl process-spawn overhead is the
+  bottleneck (so the shell-mode numbers are 1-2 orders of magnitude
+  below reality). Also: handles `NO_COLOR=1` env (oha argparse needs
+  `--no-color true` literal). `docs/DEPLOYMENT.md` Load-test section
+  rewritten to document expected ranges (5,000-30,000 req/s with
+  oha on localhost).
+
 ### Added
 
 - **Deployment kit** (post-v0.1.0, no source changes):

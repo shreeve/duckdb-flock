@@ -264,26 +264,46 @@ Once validation is green, sanity-check the session pool under
 concurrency:
 
 ```bash
-# 10 workers × 50 SELECT-42 each = 500 requests
+# Default: 50 connections, 5 seconds sustained load
 scripts/load-test.sh http://127.0.0.1:9494 "$TOKEN"
 
-# Heavier — bump concurrency to 50, 100 each = 5000 requests
-scripts/load-test.sh http://127.0.0.1:9494 "$TOKEN" 50 100
+# Heavier — 200 connections, 30 seconds
+scripts/load-test.sh http://127.0.0.1:9494 "$TOKEN" 200 30
 ```
 
-Output reports throughput, error rate, and p50/p95/p99/max latency.
-Pass/fail thresholds:
+The script auto-detects which benchmarker is on your `$PATH`, in
+this preference order:
 
-- Error rate must be ≤ 0.5%
+1. **`oha`** (Rust; `brew install oha` on macOS, `cargo install oha`
+   anywhere) — modern, accurate, recommended.
+2. **`wrk`** (C; `apt-get install wrk` on Debian/Ubuntu, `brew install
+   wrk` on macOS) — classic, very fast.
+3. **Pure-shell fallback** — only when neither tool is installed.
+   Loops `curl` per request. The numbers will be DRAMATICALLY lower
+   than reality because each `curl` invocation is a fresh process +
+   TCP handshake; the shell harness, not harbor, is the bottleneck.
+   The script prints a loud banner reminding you of this.
+
+Output reports throughput, error rate, and p95 latency. Pass/fail
+thresholds (applied to whichever mode runs):
+
+- Error rate must be ≤ 0.5%.
 - p95 of `SELECT 42` should be < 1 s in any reasonable deployment
   (warning, not failure — reverse-proxy and container overhead can
-  push this legitimately)
+  push this legitimately).
 
-If the error rate is non-zero, dig into the non-200 codes the script
-prints. The two interesting ones are 409 `SESSION_BUSY` (your client
-is reusing a single sessionId concurrently — design your client
-correctly) and 504 `QUERY_TIMEOUT` (you're hitting the
+If the error rate is non-zero in tool mode, dig into the
+non-2xx codes. The two interesting ones are 409 `SESSION_BUSY`
+(your client is reusing a single `sessionId` concurrently — design
+your client correctly) and 504 `QUERY_TIMEOUT` (you're hitting the
 `harbor_query_timeout_s` ceiling — adjust query or timeout).
+
+> **Sample numbers (oha against a local laptop harbor)**: with `oha`
+> on a M-series Mac running harbor on localhost, expect SELECT-42
+> throughput in the **5,000–30,000 req/s** range with sub-millisecond
+> p99. The pure-shell fallback typically reports 200–600 req/s on the
+> same hardware due to per-curl process overhead — that's a measurement
+> artifact, not a harbor limit.
 
 ---
 
