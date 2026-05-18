@@ -1,0 +1,46 @@
+# docker-compose.yml — local-laptop / Incus-container deployment.
+#
+# Build + run:
+#   cd deploy/
+#   docker compose up --build
+#
+# The container exposes harbor on http://localhost:9494. The token is
+# whatever you set in HARBOR_TOKEN; if you leave it unset, harbor_serve
+# generates one and logs it on first start.
+#
+# State persists in the named `harbor-data` volume — restart-safe.
+# Cookie signing key is ephemeral per process by design (SPEC §7), so
+# `docker compose restart` invalidates browser sessions; the bearer
+# token + auth function survive.
+
+services:
+  harbor:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: harbor:0.1.0
+    container_name: harbor
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9494:9494"   # bind localhost only; reverse-proxy from host for TLS
+    environment:
+      # Replace this BEFORE any non-throwaway use. Generate via:
+      #   openssl rand -hex 32
+      HARBOR_TOKEN: "REPLACE-WITH-OPENSSL-RAND-HEX-32"
+    volumes:
+      - harbor-data:/var/lib/harbor
+      # Optional: mount a richer bootstrap that loads custom auth + CORS:
+      #   ../examples/auth/bearer-table-multi-tenant.sql
+      #   along with a custom bootstrap that .read's it. Mount over
+      #   /var/lib/harbor/harbor-bootstrap.sql to override the default.
+      # - ./harbor-bootstrap-prod.sql:/var/lib/harbor/harbor-bootstrap.sql:ro
+      # - ../examples/auth:/var/lib/harbor/auth:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo > /dev/tcp/127.0.0.1/9494"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  harbor-data:

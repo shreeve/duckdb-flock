@@ -4,6 +4,35 @@ All notable changes to the `harbor` DuckDB extension are documented
 here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Deployment kit** (post-v0.1.0, no source changes):
+  - `docs/DEPLOYMENT.md` — end-to-end guide from local laptop smoke
+    test through systemd / Docker / Incus deployments, with hardening
+    + validation + load-test sections.
+  - `scripts/validate-deployment.sh` — 28-assertion HTTP smoke test
+    pointable at any deployed harbor (reuses the golden-test pattern
+    against a remote URL). Validates liveness, /sql happy paths, all
+    auth invariants, Mode A + Mode B params, login-page CSP+nonce,
+    cookie roundtrip incl. CSRF defense, CORS allow-list, /quack
+    route, admin endpoint default-deny.
+  - `scripts/load-test.sh` — concurrent /sql hammering with
+    per-request latency tracking. Reports throughput, error rate,
+    p50/p95/p99/max. Pass/fail at error rate > 0.5%.
+  - `deploy/Dockerfile` + `deploy/docker-compose.yml` +
+    `deploy/harbor-bootstrap-docker.sql` — single-stage container
+    that downloads DuckDB CLI v1.5.2 and the matching harbor binary
+    from the v0.1.0 release.
+  - `deploy/harbor.service` + `deploy/harbor-bootstrap.sql` — systemd
+    unit + bootstrap SQL with hardening defaults (restricted
+    `User=`, `ProtectSystem=strict`, `NoNewPrivileges`, etc.).
+  - `examples/auth/` — production-grade auth callback recipes:
+    `bearer-only-static.sql`, `bearer-table-multi-tenant.sql`,
+    `bearer-with-expiry.sql`, `rbac-authorization.sql`. Each
+    self-contained and copy-paste-loadable.
+
 ## [0.1.0] — 2026-05
 
 Initial release. Tracks upstream `duckdb-quack` `v1.5-variegata` and
