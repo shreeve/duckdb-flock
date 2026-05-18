@@ -25,29 +25,54 @@
 # structure, same pinned ci_tools_version, same calling convention.
 
 name: Main Extension Distribution Pipeline
-# Trigger on every code change. `paths-ignore` keeps pure-docs commits
-# (README, CHANGELOG, the upstream-*-patches notes, .editorconfig,
-# LICENSE) from burning ~30 cross-platform runner-minutes on changes
-# that can't possibly affect the binary. Mixed commits (code + docs)
-# still trigger normally — `paths-ignore` only short-circuits when
-# every changed path matches the list. Workflow-file changes are NOT
-# in the ignore list, so editing this file itself still triggers a
-# rebuild (which is what validates the change).
+# Trigger on every code change. `paths-ignore` short-circuits the
+# matrix when ALL changed paths match — i.e. the commit can't
+# possibly affect the compiled .duckdb_extension binary or the tests
+# CI runs against it. Mixed commits (code + docs) still rebuild;
+# only purely-non-build commits skip.
+#
+# What CI actually consumes (so we DO NOT ignore these):
+#   - src/**                        C++ source
+#   - test/**                       sqllogictest (run via `make test_release`)
+#   - CMakeLists.txt, src/.../CMakeLists.txt
+#   - Makefile, *.Makefile          build glue
+#   - extension_config.cmake        what extensions to bundle
+#   - vcpkg.json                    native deps
+#   - .gitmodules                   submodule pointer changes
+#   - .github/workflows/**          the workflow files themselves
+#                                   (so changes here DO trigger
+#                                    a build, validating the change)
+#
+# Everything below is operator-facing tooling, examples, or docs:
+# zero impact on the binary and zero usage by CI. Skipping the
+# matrix on these saves ~30 cross-platform runner-minutes per push.
 on:
   push:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
+      - 'scripts/**'        # golden-*.sh, validate-deployment.sh, load-test.sh — CI doesn't run them
+      - 'examples/**'       # auth recipes (operator-loaded SQL)
+      - 'deploy/**'         # Dockerfile, systemd unit, bootstrap SQL
       - 'CHANGELOG.md'
       - '.editorconfig'
+      - '.gitignore'
+      - '.gitattributes'
       - 'LICENSE'
+      - 'CITATION.cff'
   pull_request:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
+      - 'scripts/**'
+      - 'examples/**'
+      - 'deploy/**'
       - 'CHANGELOG.md'
       - '.editorconfig'
+      - '.gitignore'
+      - '.gitattributes'
       - 'LICENSE'
+      - 'CITATION.cff'
   workflow_dispatch:
 
 concurrency:

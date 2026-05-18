@@ -6,6 +6,29 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- CI `paths-ignore` extended to cover every path that can't affect
+  the compiled `.duckdb_extension` binary or the tests CI runs
+  against it. Now skipped: `scripts/**`, `examples/**`, `deploy/**`,
+  `.gitignore`, `.gitattributes`, `CITATION.cff` (in addition to
+  the previous list of `**.md`, `docs/**`, `CHANGELOG.md`,
+  `.editorconfig`, `LICENSE`). Commits that touch ONLY non-build
+  paths now skip the 9-platform matrix entirely; mixed commits
+  (code + docs) still rebuild as before. Workflow-file changes
+  (`.github/workflows/**`) deliberately stay outside the ignore
+  list so workflow edits validate themselves.
+- `scripts/load-test.sh` upgraded to auto-detect a real HTTP
+  benchmarker (`oha` preferred, `wrk` fallback) and use it instead
+  of the per-request `curl` shell loop. The previous shell-loop mode
+  is still available via `--shell` flag, but the script prints a
+  banner explaining the per-curl process-spawn overhead is the
+  bottleneck (so the shell-mode numbers are 1-2 orders of magnitude
+  below reality). Also: handles `NO_COLOR=1` env (oha argparse needs
+  `--no-color true` literal). `docs/DEPLOYMENT.md` Load-test section
+  rewritten to document expected ranges (5,000-30,000 req/s with
+  oha on localhost).
+
 ### Added
 
 - **Deployment kit** (post-v0.1.0, no source changes):
