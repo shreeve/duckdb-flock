@@ -8,6 +8,16 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- CI `paths-ignore` extended to cover every path that can't affect
+  the compiled `.duckdb_extension` binary or the tests CI runs
+  against it. Now skipped: `scripts/**`, `examples/**`, `deploy/**`,
+  `.gitignore`, `.gitattributes`, `CITATION.cff` (in addition to
+  the previous list of `**.md`, `docs/**`, `CHANGELOG.md`,
+  `.editorconfig`, `LICENSE`). Commits that touch ONLY non-build
+  paths now skip the 9-platform matrix entirely; mixed commits
+  (code + docs) still rebuild as before. Workflow-file changes
+  (`.github/workflows/**`) deliberately stay outside the ignore
+  list so workflow edits validate themselves.
 - `scripts/load-test.sh` upgraded to auto-detect a real HTTP
   benchmarker (`oha` preferred, `wrk` fallback) and use it instead
   of the per-request `curl` shell loop. The previous shell-loop mode
