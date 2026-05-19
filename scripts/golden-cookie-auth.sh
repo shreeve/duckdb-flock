@@ -296,9 +296,20 @@ assert_no_harbor_auth_leak "cookie auth"
 # Allow-listed headers pass through.
 grep -qi '^Accept: application/javascript' "${MOCK_CAPTURE}" \
     || fail "PR-8 A: Accept header should be forwarded (allow-list entry)"
-grep -qi '^Accept-Encoding: gzip' "${MOCK_CAPTURE}" \
-    || fail "PR-8 A: Accept-Encoding should be forwarded (allow-list entry)"
-pass "PR-8 A: cookie-authenticated proxy strips Cookie/harbor_session/Auth/X-Harbor-* and forwards allow-list"
+# PR-8 update (post-v0.1.0 v0.1.1 patch): harbor now forces
+# `Accept-Encoding: identity` upstream regardless of what the
+# browser asks for. cpp-httplib's HTTPS client doesn't reliably
+# decode gzip/br response bodies (bug surfaced when browsers
+# fetched UI assets and got 500s). The credential-strip invariant
+# is UNCHANGED — we still don't forward Cookie/Authorization/etc.
+# This assertion is the explicit guard that we send identity (and
+# don't accidentally regress to forwarding the browser's value).
+if ! grep -qi '^Accept-Encoding: identity' "${MOCK_CAPTURE}"; then
+  echo "--- captured upstream request ---" >&2
+  cat "${MOCK_CAPTURE}" >&2
+  fail "PR-8 A: Accept-Encoding should be forced to 'identity' upstream (compression-bug fix)"
+fi
+pass "PR-8 A: cookie-authenticated proxy strips Cookie/harbor_session/Auth/X-Harbor-* and forces Accept-Encoding: identity"
 
 # ---- Scenario B: authenticate via Bearer. Verify Authorization does
 #                  NOT leak (even though it was the credential we used

@@ -6,7 +6,66 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+(none yet)
+
+## [0.1.1] — 2026-05-18
+
+### Fixed
+
+- **UI proxy 500s on compressed asset bodies.** The browser sends
+  `Accept-Encoding: gzip, deflate, br` on every UI asset fetch.
+  cpp-httplib's HTTPS client (used by harbor's outbound `GET /.*`
+  proxy) doesn't reliably decode compressed response bodies — the
+  read fails with `Error::Read` ("Failed to read connection") and
+  the user sees a 500 in the browser, with the DuckDB UI showing
+  blank assets and a "Connection to DuckDB Lost" modal. Harbor now
+  forces `Accept-Encoding: identity` upstream regardless of what
+  the browser asked. The browser↔harbor hop is localhost (or a
+  same-DC reverse proxy where compression is the proxy's job), so
+  the bandwidth savings on that hop are nil. End-to-end: full
+  uncompressed pass-through. Pure compression-pass-through is
+  queued for v0.2 via the libcurl/`HTTPUtil` migration (see
+  AGENTS.md PR-10b).
+- **`/localEvents` 401 on same-origin EventSource (browser CSRF
+  defense was too strict).** Per the Fetch spec, browsers do NOT
+  send `Origin` on same-origin "no-cors" requests like
+  `new EventSource('/localEvents')` — but the route handler was
+  rejecting an empty Origin pre-auth. Now: empty Origin is
+  accepted (auth-gated below); cross-origin with disallowed
+  Origin still rejects pre-auth. The DuckDB UI's SSE long-poll
+  for catalog events now stays open instead of immediately 401'ing,
+  which was the proximate cause of the "Connection to DuckDB Lost"
+  modal.
+- **`/localToken` 401 on `Referer: http://127.0.0.1:<port>/` with
+  harbor bound on `127.0.0.1`.** The Referer-prefix check
+  hardcoded `http://localhost:<port>` regardless of bind host.
+  Browsers connecting via `http://127.0.0.1:<port>` (the default
+  printed by `harbor_serve`) never matched. Now checks against
+  the same loopback-variant set that `IsAllowedOrigin` uses
+  (`localhost` / `127.0.0.1` / `[::1]` / configured bind host).
+  Cross-origin Referer still 401s.
+
+### Added
+
+- **Retry-once on transport-layer errors in `HandleProxyGet`.** A
+  single retry with a fresh `httplib::Client` on `Error::Read`,
+  `Error::Write`, or `Error::Connection` masks transient TLS
+  hiccups, edge-server resets, and similar cpp-httplib quirks.
+  If the retry also fails, the original error propagates.
+- **`golden-cookie-auth.sh` PR-8 A assertion updated** to verify
+  that harbor sends `Accept-Encoding: identity` upstream (the
+  positive guard for the compression-bug fix), instead of the
+  previous assertion that the browser's gzip preference was
+  forwarded verbatim.
+
+## [0.1.0] — 2026-05 (post-release notes)
+
+The original 0.1.0 entry below is preserved for historical context.
+Several CI/tooling improvements landed between 0.1.0 and 0.1.1
+without changing extension behavior — they all originally appeared
+in the 0.1.0 [Unreleased] section before the rename:
+
+### CI / tooling (post-0.1.0)
 
 - CI `paths-ignore` extended to cover every path that can't affect
   the compiled `.duckdb_extension` binary or the tests CI runs
@@ -130,4 +189,5 @@ Initial release. Tracks upstream `duckdb-quack` `v1.5-variegata` and
   (`{"ok":false,"errorCode":"<code>","error":<msg>}`) — pre-existing
   tech debt, post-v0.1 normalization.
 
+[0.1.1]: https://github.com/shreeve/duckdb-harbor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/shreeve/duckdb-harbor/releases/tag/v0.1.0

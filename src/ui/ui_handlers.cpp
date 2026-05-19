@@ -460,8 +460,23 @@ void UiHandlers::HandleGetLocalToken(const httplib::Request &req, httplib::Respo
 
 	// GET requests don't include Origin, so use Referer instead.
 	// Referer includes the path, so only compare the start.
+	//
+	// Accept any of the local URL variants we'd accept as Origin
+	// elsewhere (allowed_origins already has http://localhost:<port>,
+	// http://127.0.0.1:<port>, http://[::1]:<port>, and the configured
+	// bind host if any). The previous code hardcoded only the
+	// localhost variant; users connecting via 127.0.0.1 (the default
+	// when copy-pasting from harbor_serve's output) saw 401 here
+	// even though the browser was clearly same-origin.
 	auto referer = req.get_header_value("Referer");
-	if (referer.compare(0, local_url_prefix.size(), local_url_prefix) != 0) {
+	bool referer_ok = false;
+	for (const auto &prefix : allowed_origins) {
+		if (referer.compare(0, prefix.size(), prefix) == 0) {
+			referer_ok = true;
+			break;
+		}
+	}
+	if (!referer_ok) {
 		res.status = 401;
 		return;
 	}
@@ -565,12 +580,36 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 	// only cookies upstream itself set (tracked by inspecting Set-Cookie
 	// in prior responses) — NOT a Cookie passthrough that includes
 	// whatever the browser happens to send.
-	httplib::Headers headers = {{"User-Agent", user_agent}};
+	// Force `Accept-Encoding: identity` upstream regardless of what the
+	// browser asked. This sidesteps two cpp-httplib quirks:
+	//
+	//   1. Upstream's compressed body fails cpp-httplib client's
+	//      decompression (its zlib/brotli support is conditional
+	//      on compile flags that the vendored httplib build doesn't
+	//      always have set), surfacing as `Error::Read`
+	//      ("Failed to read connection") → 500 in the browser.
+	//
+	//   2. Even with `client.set_decompress(false)` to bypass the
+	//      decompression attempt, cpp-httplib SERVER-side then emits
+	//      both `Content-Length` (from upstream) and `Transfer-Encoding:
+	//      chunked` (auto-applied for large bodies), which is invalid
+	//      HTTP framing and breaks browser parsers.
+	//
+	// Forcing identity keeps the body uncompressed end-to-end, which
+	// is the right merit for v0.1: harbor↔browser is localhost (or a
+	// same-DC reverse proxy where compression is the proxy's job),
+	// so the bandwidth savings on that hop are nil. Pure pass-through
+	// of compressed bytes is the v0.2 plan via libcurl/HTTPUtil
+	// (PR-10b in AGENTS.md), which has native gzip/br handling AND
+	// doesn't have the chunked-vs-content-length framing conflict.
+	httplib::Headers headers = {
+	    {"User-Agent", user_agent},
+	    {"Accept-Encoding", "identity"},
+	};
 	static const char *const kForwardableRequestHeaders[] = {
 	    "Accept",            // content-type negotiation
-	    "Accept-Encoding",   // gzip/br negotiation; we pass body bytes through
 	    "Accept-Language",   // localized assets if upstream supports it
-	    "If-None-Match",     // ETag revalidation (304 path; PR-10 will care)
+	    "If-None-Match",     // ETag revalidation (304 path)
 	    "If-Modified-Since", // legacy revalidation
 	    "Range",             // partial-content for large assets
 	};
@@ -581,7 +620,26 @@ void UiHandlers::HandleProxyGet(const httplib::Request &req, httplib::Response &
 		}
 	}
 
+	// Defensive retry on transport-layer errors. cpp-httplib's HTTPS
+	// client occasionally hits Error::Read / Error::Write / Error::Connection
+	// on otherwise-fine upstream connections (transient TLS handshake
+	// hiccups, edge-server connection-reset, etc.). A single retry
+	// with a fresh client masks these for end users without changing
+	// architecture. If the retry also fails, the original error
+	// propagates.
 	auto result = client.Get(req.path, req.params, headers);
+	if (!result) {
+		const auto e = result.error();
+		if (e == httplib::Error::Read || e == httplib::Error::Write ||
+		    e == httplib::Error::Connection) {
+			httplib::Client retry(remote_url);
+			InitClientFromParams(retry);
+			if (IsEnvEnabled("ui_disable_server_certificate_verification")) {
+				retry.enable_server_certificate_verification(false);
+			}
+			result = retry.Get(req.path, req.params, headers);
+		}
+	}
 	if (!result) {
 		res.status = 500;
 		res.set_content("Could not fetch: '" + req.path + "' from '" + remote_url +
@@ -965,10 +1023,17 @@ void UiHandlers::Register(duckdb_httplib_openssl::Server &http) {
 	// returns), so the ActiveRequestGuard must outlive the lambda.
 	// Use a shared_ptr captured by the provider closure.
 	http.Get("/localEvents", [self](const httplib::Request &req, httplib::Response &res) {
-		// SSE requests come from the browser via JS EventSource, which
-		// DOES include Origin headers. Require the Origin gate too —
-		// /localEvents has the same CSRF surface as /ddb/*.
-		if (!self->IsAllowedOrigin(req.get_header_value("Origin"))) {
+		// CSRF defense for the SSE long-poll. Per Fetch spec, browsers
+		// do NOT send Origin on same-origin "no-cors" requests like
+		// `new EventSource('/localEvents')` — so an empty Origin is
+		// implicitly same-origin and OK to proceed (auth-gated below).
+		// A non-empty Origin that is NOT in the allow-list is a
+		// cross-origin attempt and we reject pre-auth. Cross-origin
+		// requests WITHOUT credentials would also fail the auth check
+		// below; cross-origin WITH `withCredentials=true` is the actual
+		// CSRF surface this guard closes.
+		const auto origin = req.get_header_value("Origin");
+		if (!origin.empty() && !self->IsAllowedOrigin(origin)) {
 			res.status = 401;
 			return;
 		}
