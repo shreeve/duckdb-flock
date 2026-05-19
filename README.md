@@ -125,6 +125,15 @@ simultaneously, all backed by the same in-process DuckDB instance:
 Writes through any one of these are immediately visible to all the others.
 Zero duplication, zero sync.
 
+> **"Isn't this just the Quack extension + an httpserver extension + the
+> DuckDB UI extension?"** Those are the inputs; the integration is the
+> value. One auth model across three protocols, one port, one config
+> surface, one log stream, one production deploy artifact, with
+> type-correct streaming JSON and wire compat with stock clients.
+> Full breakdown — what each input gives you in stock form, what
+> harbor adds beyond the sum, and what harbor explicitly is *not* —
+> in [`docs/WHY_HARBOR.md`](docs/WHY_HARBOR.md).
+
 ## Ways to Connect
 
 ### 1. Browser — Official DuckDB UI
