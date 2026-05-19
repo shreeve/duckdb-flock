@@ -187,6 +187,25 @@ quack:localhost:19495	http://localhost:19495	harbor-cors-test
 statement ok con1
 CALL harbor_stop('quack:localhost:19495')
 
+# v0.1.2 — harbor_stop() no-arg overload (issue #28). Single-server-
+# per-process semantics make the no-arg form unambiguous: it stops
+# whatever's currently running. Both forms must coexist.
+query III con1
+CALL harbor_serve('quack:localhost:19495', token='harbor-stop-noarg-test')
+----
+quack:localhost:19495	http://localhost:19495	harbor-stop-noarg-test
+
+statement ok con1
+CALL harbor_stop()
+
+# Idempotent? When nothing is running, no-arg form should clearly
+# error (not silently say "no server found" — that branch is for
+# the URI-arg form which can be called speculatively).
+statement error con1
+CALL harbor_stop()
+----
+no server is currently running
+
 # Refuse-to-start: malformed origin (has path) is rejected.
 statement ok
 SET GLOBAL harbor_cors_origins='https://app.example.com/admin'

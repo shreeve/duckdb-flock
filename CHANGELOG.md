@@ -6,7 +6,26 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-(none yet)
+### Added
+
+- `harbor_stop()` no-arg overload ([#28](https://github.com/shreeve/duckdb-harbor/issues/28)).
+  Single-server-per-process semantics make the no-arg form unambiguous:
+  it stops whatever's currently running, with a clear error if nothing
+  is. The existing `harbor_stop(uri)` form is preserved for callers
+  scripted with a literal URI and for symmetry with `quack_stop(uri)`.
+- Auto-load `httpfs` on harbor extension load ([#29](https://github.com/shreeve/duckdb-harbor/issues/29)).
+  Side-loaded local builds (downloaded from the GitHub Release, or
+  `LOAD '/abs/path/harbor.duckdb_extension'`) historically required an
+  explicit `LOAD httpfs;` before `CALL harbor_serve(...)`, because
+  `harbor_serve` uses libcrypto (HMAC, CSPRNG, CSP-nonce) that lives in
+  the httpfs extension. The community-installed `harbor` (`INSTALL harbor
+  FROM community`) auto-pulled httpfs as a transitive dep; side-loaded
+  builds didn't, leading to a confusing `Invalid Configuration Error:
+  DuckDB currently has a read-only crypto module loaded` on first use.
+  Auto-load closes that footgun for both install paths. Best-effort:
+  if `AutoLoadExtension` can't find httpfs (custom DuckDB build,
+  network-isolated env), the operator still gets DuckDB's clearer
+  error from `harbor_serve` itself.
 
 ## [0.1.1] — 2026-05-18
 
@@ -152,8 +171,11 @@ Initial release. Tracks upstream `duckdb-quack` `v1.5-variegata` and
 - **Local-dev bypass** (`harbor_local_dev_mode`) — synthetic
   `__HARBOR_LOCAL_DEV__` principal so the connection-pool isolation
   invariant still holds. Forced off when `harbor_bind ≠ 127.0.0.1`.
-- **Logging** — `'Harbor'` log type registered (`'Quack'` alias kept
-  for upstream-tooling compatibility).
+- **Logging** — `'Quack'` log type registered (inherited verbatim from
+  upstream `duckdb-quack`). A planned rename to `'Harbor'` with `'Quack'`
+  preserved as a back-compat alias was tracked in issue
+  [#30](https://github.com/shreeve/duckdb-harbor/issues/30) and
+  deferred — the existing name is functionally complete.
 
 ### Verified
 

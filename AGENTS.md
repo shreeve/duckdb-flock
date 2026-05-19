@@ -908,18 +908,26 @@ in mind:
 
 ## Logging
 
+The runtime log type is registered as `'Quack'` (inherited verbatim
+from upstream `duckdb-quack`):
+
 ```sql
-CALL enable_logging('Harbor');
+CALL enable_logging('Quack');
 -- ... run some queries ...
-SELECT * FROM duckdb_logs_parsed('Harbor');
+SELECT * FROM duckdb_logs_parsed('Quack');
 
 -- Persist to disk
-CALL enable_logging('Harbor', storage => 'file',
+CALL enable_logging('Quack', storage => 'file',
                     storage_config => {'path':'/var/log/harbor'});
 ```
 
-The `'Quack'` log name is registered as an alias for the upstream
-tooling that filters on it.
+> **Naming history:** the harbor design originally proposed a
+> `'Harbor'` log type with `'Quack'` as a back-compat alias — see
+> issue [#30](https://github.com/shreeve/duckdb-harbor/issues/30).
+> That rename was deferred since the existing `'Quack'` name is
+> functionally complete and stays compatible with any upstream
+> tooling that filters on it. Documentation here was updated in
+> v0.1.2 to match the actual registered name.
 
 ## Known gotchas
 
