@@ -164,6 +164,33 @@ static TableFunction GetQuackIdentifyFunction() {
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("harbor — DuckDB as an HTTP service (PR-2: HarborHttpServer)");
 
+	// Auto-load httpfs. harbor_serve uses DuckDB's writable crypto module
+	// (HMAC-SHA256 cookie signing, CSPRNG cookie-nonce generation,
+	// CSP-nonce generation) and that module is provided by the libcrypto
+	// link inside the httpfs extension. Without httpfs loaded first,
+	// harbor_serve fails with:
+	//
+	//   Invalid Configuration Error: DuckDB currently has a read-only
+	//   crypto module loaded. Please ensure httpfs is loaded using
+	//   `LOAD httpfs`...
+	//
+	// The community-installed harbor (`INSTALL harbor FROM community`)
+	// auto-pulls httpfs as a transitive dep via DuckDB's package manifest;
+	// side-loaded local builds (downloaded from the GitHub Release, or
+	// `LOAD '/abs/path/harbor.duckdb_extension'`) don't, so historically
+	// users had to remember `LOAD httpfs;` first. This auto-load
+	// closes that footgun for both install paths.
+	//
+	// Failures here are intentionally swallowed — if AutoLoadExtension
+	// can't find httpfs (custom DuckDB build, network-isolated env, etc.),
+	// the operator will still get DuckDB's clearer error from harbor_serve
+	// itself, which already explains the fix.
+	try {
+		ExtensionHelper::AutoLoadExtension(loader.GetDatabaseInstance(), "httpfs");
+	} catch (...) {
+		// Best-effort; harbor_serve will still surface a clear error.
+	}
+
 	// harbor-specific: SELECT harbor_version() as the smoke-test surface.
 	// Not volatile — the build's version string is deterministic for the
 	// lifetime of the process.

@@ -122,6 +122,31 @@ unique_ptr<FunctionData> HarborStopBind(ClientContext & /* context */, TableFunc
 	return std::move(bind_data);
 }
 
+// No-arg variant. Resolves "the" running server's URI via
+// HarborServerState::WithCurrent. Throws cleanly if no server is
+// running. Single-server-per-process makes this unambiguous (per
+// SPEC §2 / §9), and saves operators from having to remember the
+// exact bind URI they passed to harbor_serve.
+unique_ptr<FunctionData> HarborStopBindNoArg(ClientContext & /* context */,
+                                              TableFunctionBindInput & /* input */,
+                                              vector<LogicalType> &return_types,
+                                              vector<string> &names) {
+	auto bind_data = make_uniq<HarborLifecycleBindData>();
+	bool found = false;
+	HarborServerState::Global().WithCurrent([&](HarborHttpServer &server) {
+		bind_data->listen_uri = server.ListenUri();
+		found = true;
+	});
+	if (!found) {
+		throw InvalidInputException(
+		    "harbor_stop(): no server is currently running. "
+		    "Use harbor_serve() first, or pass an explicit URI to harbor_stop(uri).");
+	}
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("status");
+	return std::move(bind_data);
+}
+
 void HarborStop(ClientContext & /* context */, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->CastNoConst<HarborLifecycleBindData>();
 	if (bind_data.finished) {
@@ -138,8 +163,14 @@ void HarborStop(ClientContext & /* context */, TableFunctionInput &data_p, DataC
 
 } // namespace
 
-TableFunction HarborStopFunction::GetFunction() {
-	return TableFunction("harbor_stop", {LogicalType::VARCHAR}, HarborStop, HarborStopBind);
+TableFunctionSet HarborStopFunction::GetFunction() {
+	TableFunctionSet set("harbor_stop");
+	// (a) harbor_stop() — no args; auto-discover the running server.
+	set.AddFunction(TableFunction("harbor_stop", {}, HarborStop, HarborStopBindNoArg));
+	// (b) harbor_stop(uri) — explicit URI; preserved for callers that
+	//     scripted it with a literal URI, and for symmetry with quack_stop(uri).
+	set.AddFunction(TableFunction("harbor_stop", {LogicalType::VARCHAR}, HarborStop, HarborStopBind));
+	return set;
 }
 
 // -- harbor_wait ----------------------------------------------------------
