@@ -57,6 +57,13 @@ one session pool, and one auth/authz model.
 
 ## 2. Architecture
 
+> For the higher-level "why does this exist when stock Quack + an
+> httpserver extension + duckdb-ui already exist" framing — input
+> deltas, what harbor adds beyond the sum, and what harbor is
+> explicitly *not* — see
+> [`docs/WHY_HARBOR.md`](docs/WHY_HARBOR.md). This section is the
+> architectural truth; that doc is the positioning summary.
+
 ### Process layout
 
 ```

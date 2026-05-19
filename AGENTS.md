@@ -21,6 +21,11 @@ Plus auth routes (`/auth/login`, `/auth/logout`) and convenience routes
 (`/health`, `/ready`, `/tables`, `/schema/:db/:t`, `/whoami`,
 `/checkpoint`, `/sessions`, `/interrupt`).
 
+For the public-facing "why does this exist when those three already
+exist" framing — useful when explaining harbor to evaluators or
+grounding yourself before reading SPEC.md — see
+[`docs/WHY_HARBOR.md`](./docs/WHY_HARBOR.md).
+
 ## Implementation roadmap
 
 harbor is being implemented in staged PRs. **Do not jump ahead** unless

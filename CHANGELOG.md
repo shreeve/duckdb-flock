@@ -4,6 +4,19 @@ All notable changes to the `harbor` DuckDB extension are documented
 here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- **`docs/WHY_HARBOR.md`** — new positioning doc answering the natural
+  evaluator question "isn't this just the Quack extension + an
+  httpserver extension + the DuckDB UI extension?" Covers what each
+  input gives you in stock form, the 12 things harbor adds beyond
+  the sum (architectural foundation / data plane / policy plane /
+  wire compat / operations), and what harbor explicitly is *not*.
+  Cross-linked from `README.md` (after "What It Does"), `AGENTS.md`
+  (after the protocol table), and `SPEC.md` §2 (Architecture).
+
 ## [0.1.3] — 2026-05-19
 
 ### Documentation
