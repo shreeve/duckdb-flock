@@ -717,6 +717,57 @@ including read/write of every table and `ATTACH` to remote sources. The
 auth token effectively grants superuser access to the database file.
 Treat it as a database password.
 
+What this means concretely, with **default permissive auth**
+(`harbor_check_token` + `harbor_nop_authorization`, which is what
+`harbor_serve` ships with):
+
+| Threat | Protected by harbor? |
+|---|---|
+| Network attackers without a valid bearer / cookie / X-Harbor-Token | ✅ — every authenticated endpoint requires a credential, with HMAC-signed cookies for browser flows |
+| Cross-site request forgery via ambient cookie | ✅ — `/sql` and `/ddb/*` cookie path requires `Origin` in `harbor_cors_origins` (or same-origin for `/ddb/*`); `/localEvents` rejects cross-origin Origin |
+| Bearer-leak in the UI proxy | ✅ — `HandleProxyGet` strips `Cookie`, `Authorization`, `X-Harbor-*`, `Origin`, `Sec-*` before forwarding upstream (PR-8 invariant) |
+| Authenticated principal running `SET GLOBAL` to grant themselves admin access | ❌ — see below |
+| Authenticated principal running `ATTACH '/path/to/anything'`, `LOAD 'arbitrary.duckdb_extension'`, `COPY (...) TO 'file://...'`, etc. | ❌ — these are normal SQL that the default authz callback allows |
+| Authenticated principal reading and modifying any table | ❌ — by design; that's the whole point of the SQL surface |
+
+**Bearer-authenticated `/sql` is effectively superuser unless you
+configure `harbor_authorization_function` to constrain the SQL
+content.** `harbor_allow_admin_without_authz` and the default-deny
+on admin endpoints are operator convenience, not a security wall:
+
+- **What default-deny on admin IS:** a safety net for operators who
+  haven't yet configured `harbor_authorization_function`. They get
+  `403 FORBIDDEN` on `/tables`, `/sessions`, `/checkpoint`, etc.
+  instead of those endpoints silently working for any authenticated
+  caller. Less surprise during initial setup.
+- **What default-deny on admin IS NOT:** a barrier against an
+  authenticated bearer that already has `/sql` access. That bearer
+  can run `SET GLOBAL harbor_allow_admin_without_authz = TRUE`
+  through `/sql` itself and unlock every admin endpoint. The flag
+  is in DuckDB's normal settings space; SQL controls it.
+
+This mirrors every other database with a SQL surface: PostgreSQL,
+MySQL, SQLite, and DuckDB itself all assume a "trusted SQL caller"
+threat model. The auth model promises *who* can issue SQL; it does
+not promise *what SQL* they can issue, except via the explicit
+`harbor_authorization_function` hook.
+
+**Production deployments must configure `harbor_authorization_function`**
+to gate both:
+
+1. Admin endpoints — by checking `__HARBOR_ADMIN__:resource:action`
+   queries against an RBAC table (or equivalent); see
+   [`examples/auth/rbac-authorization.sql`](examples/auth/rbac-authorization.sql).
+2. Dangerous SQL on `/sql` — by inspecting the SQL text and
+   rejecting `SET GLOBAL`, `ATTACH`, `LOAD`, `INSTALL`, and
+   `COPY (...) TO 'file://...'` from non-admin principals. Pair
+   with one of the [`bearer-*.sql`](examples/auth/) recipes for
+   per-principal token bookkeeping.
+
+For the operator-facing rollout checklist, see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §3 "Harden". For
+copy-paste recipes, see [`examples/auth/`](examples/auth/).
+
 ### Defaults
 
 | Concern | Default |
