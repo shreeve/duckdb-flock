@@ -1099,18 +1099,20 @@ Quack-aware tooling working.
 
 harbor registers two log types in DuckDB's logging system:
 
-- `'Harbor'` (LEVEL: DEBUG) — every protocol message, all routes.
+- `'Quack'` (LEVEL: DEBUG) — every protocol message, all routes.
   Fields: `route`, `session_id`, `principal`, `client_query_id`,
   `query` (only if `harbor_log_queries`), `duration_ms`,
-  `response_status`, `error`. Inherited and extended from quack's
-  `'Quack'` log type. The `'Quack'` name is also registered as an alias
-  for upstream tooling.
+  `response_status`, `error`. Name inherited verbatim from upstream
+  `duckdb-quack`. (A planned rename to `'Harbor'` with `'Quack'`
+  preserved as a back-compat alias was tracked in issue
+  [#30](https://github.com/shreeve/duckdb-harbor/issues/30) and
+  deferred — the existing name is functionally complete.)
 - `'HTTP'` (LEVEL: INFO) — underlying transport, inherited from upstream.
 
 Logs go to DuckDB's in-memory buffer by default; persist with:
 
 ```sql
-CALL enable_logging('Harbor', storage => 'file',
+CALL enable_logging('Quack', storage => 'file',
                     storage_config => {'path': '/var/log/harbor'});
 ```
 

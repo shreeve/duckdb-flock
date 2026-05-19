@@ -171,8 +171,11 @@ Initial release. Tracks upstream `duckdb-quack` `v1.5-variegata` and
 - **Local-dev bypass** (`harbor_local_dev_mode`) — synthetic
   `__HARBOR_LOCAL_DEV__` principal so the connection-pool isolation
   invariant still holds. Forced off when `harbor_bind ≠ 127.0.0.1`.
-- **Logging** — `'Harbor'` log type registered (`'Quack'` alias kept
-  for upstream-tooling compatibility).
+- **Logging** — `'Quack'` log type registered (inherited verbatim from
+  upstream `duckdb-quack`). A planned rename to `'Harbor'` with `'Quack'`
+  preserved as a back-compat alias was tracked in issue
+  [#30](https://github.com/shreeve/duckdb-harbor/issues/30) and
+  deferred — the existing name is functionally complete.
 
 ### Verified
 
