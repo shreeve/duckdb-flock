@@ -4,7 +4,38 @@ All notable changes to the `harbor` DuckDB extension are documented
 here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] — 2026-05-19
+
+### Documentation
+
+- **Threat model documentation** — three-place treatment cross-linked
+  for different audiences:
+  - `SPEC.md` §7 "Threat model" expanded with an explicit table of
+    "what harbor protects against vs. what it does NOT", calling
+    out that bearer-authenticated `/sql` is effectively superuser
+    unless `harbor_authorization_function` constrains the SQL,
+    and that `harbor_allow_admin_without_authz`'s default-deny is a
+    usability convenience (not a security wall) that an authenticated
+    bearer can flip via `SET GLOBAL` from `/sql` itself.
+  - `docs/DEPLOYMENT.md` §3 "Harden" gains a prominent threat-model
+    callout at the top of the section, stating the two callbacks
+    operators must configure for any non-throwaway deployment
+    (per-principal authn + SQL-content/admin-endpoint authz).
+  - `examples/auth/README.md` gains a "Why these recipes matter"
+    section that motivates each recipe with a concrete threat
+    it closes.
+
+  All three cross-link each other. Pure documentation — no code
+  or test changes.
+
+  Discovered during interactive testing of v0.1.2: a regular
+  bearer-authenticated `/sql` caller can run `SET GLOBAL
+  harbor_allow_admin_without_authz = TRUE` and unlock every admin
+  endpoint. The model is the same as every other database with a
+  SQL surface (PostgreSQL, MySQL, etc.), but the documentation
+  previously didn't make this load-bearing fact explicit.
+
+## [0.1.2] — 2026-05-19
 
 ### Added
 

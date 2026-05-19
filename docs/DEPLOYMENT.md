@@ -142,7 +142,43 @@ follow path 2a inside that container.
 
 `harbor_serve` works out of the box for development but **does not
 ship with production-safe defaults**. The four levers that matter
-before any non-throwaway deployment:
+before any non-throwaway deployment.
+
+> ## ⚠️  Threat-model reality check (read this first)
+>
+> **A bearer-authenticated `/sql` caller is effectively a DuckDB
+> superuser** unless you configure `harbor_authorization_function`
+> to constrain the SQL they can run. The default permissive
+> auth that ships with `harbor_serve` does NOT protect against:
+>
+> - An authenticated principal running `SET GLOBAL harbor_allow_admin_without_authz = TRUE`
+>   through `/sql` to unlock every admin endpoint
+> - An authenticated principal running `ATTACH '/path/to/anything'`,
+>   `LOAD 'arbitrary.duckdb_extension'`, `COPY (...) TO 'file://...'`,
+>   or any other SQL DuckDB itself permits
+> - An authenticated principal reading or modifying any table
+>
+> **The default-deny toggle on admin endpoints
+> (`harbor_allow_admin_without_authz`) is a usability convenience for
+> operators who haven't yet wired up authorization — NOT a security
+> wall.** A bearer that has `/sql` access can flip the flag itself
+> by running SQL.
+>
+> **For any non-throwaway deployment** (anything reachable by people
+> you don't 100% trust at root level), do BOTH of:
+>
+> 1. **Configure a per-principal authentication callback** (§3a) so
+>    different principals have different tokens, not one shared
+>    superuser secret.
+> 2. **Configure an authorization callback** (§3d) that gates BOTH
+>    admin endpoints AND dangerous SQL — `SET GLOBAL`, `ATTACH`,
+>    `LOAD`, `INSTALL`, `COPY (...) TO 'file://...'` — by principal.
+>
+> See [SPEC.md §7 "Threat model"](../SPEC.md#threat-model) for the
+> full architectural treatment of what harbor protects against and
+> what it explicitly leaves to the operator. See
+> [`examples/auth/`](../examples/auth/) for copy-paste-ready
+> recipes that cover the common patterns.
 
 ### 3a. Authentication function
 

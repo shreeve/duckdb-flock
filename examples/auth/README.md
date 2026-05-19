@@ -14,14 +14,45 @@ harbor with `.read examples/auth/<file>.sql`.
 > don't see session-local settings. A plain `SET` silently has no
 > effect on authentication.
 
+## Why these recipes matter
+
+Without a custom `harbor_authorization_function`, **a bearer-authenticated
+`/sql` caller is effectively a DuckDB superuser**. The default permissive
+authz returns `TRUE` for every query except `__HARBOR_ADMIN__:resource:action`
+synthetic queries, and the default-deny on those (when
+`harbor_allow_admin_without_authz=false`) is a usability safety net,
+not a security wall — a bearer with `/sql` access can flip the flag
+itself.
+
+Real protection means **two callbacks working together**:
+
+1. An **authentication** callback that distinguishes principals
+   (different tokens for different people / services), so principal_id
+   becomes a meaningful identity in logs and authz.
+2. An **authorization** callback that inspects each query's SQL text
+   AND the synthetic `__HARBOR_ADMIN__:` admin-endpoint queries,
+   gating dangerous SQL (`SET GLOBAL`, `ATTACH`, `LOAD`, `INSTALL`,
+   `COPY (...) TO 'file://...'`) and admin actions per principal.
+
+See [SPEC.md §7 "Threat model"](../../SPEC.md#threat-model) for the
+full architectural treatment of what harbor's auth model
+*does* and *does not* promise to defend against.
+
 ## Recipes
 
-| File | What it gives you |
-|---|---|
-| [`bearer-only-static.sql`](bearer-only-static.sql) | Single shared bearer token loaded from a settings table. Simplest production case. |
-| [`bearer-table-multi-tenant.sql`](bearer-table-multi-tenant.sql) | Token-per-tenant table with active/revoked state. Each token maps to a distinct principal. |
-| [`bearer-with-expiry.sql`](bearer-with-expiry.sql) | Tokens carry a `valid_until` timestamp; expired tokens are rejected without manual revocation. |
-| [`rbac-authorization.sql`](rbac-authorization.sql) | Authorization function that checks a `principals_admin_actions` table for `__HARBOR_ADMIN__:resource:action` queries — locks down admin endpoints. Pairs with any of the bearer recipes above. |
+| File | What it gives you | Threat it closes |
+|---|---|---|
+| [`bearer-only-static.sql`](bearer-only-static.sql) | Single shared bearer token loaded from a settings table. Simplest production case. | "I want to rotate the auto-generated token for *anything*, including auditability." Doesn't distinguish principals. |
+| [`bearer-table-multi-tenant.sql`](bearer-table-multi-tenant.sql) | Token-per-tenant table with active/revoked state. Each token maps to a distinct principal. | "Token-leak from one user shouldn't compromise another." Per-principal revocation via `UPDATE active = FALSE`. |
+| [`bearer-with-expiry.sql`](bearer-with-expiry.sql) | Tokens carry a `valid_until` timestamp; expired tokens are rejected without manual revocation. | "I want CI tokens that self-expire, or a maintenance window with auto-revoking access." |
+| [`rbac-authorization.sql`](rbac-authorization.sql) | Authorization function that checks a grants table for `__HARBOR_ADMIN__:resource:action` queries — locks down admin endpoints by principal. Pairs with any of the bearer recipes above. | "Admin endpoints should require explicit grant, not just authenticated bearer." Use this together with one of the bearer recipes. |
+
+> **For full protection** (closing the `/sql` ↔ admin-escalation gap),
+> extend `rbac-authorization.sql`'s `CASE` to also reject `SET GLOBAL`,
+> `ATTACH`, `LOAD`, `INSTALL`, and `COPY (...) TO 'file://...'` from
+> non-admin principals. The recipe currently focuses on the admin-endpoint
+> gate as the primary use case; the SQL-content gate is one extra
+> `WHEN ... THEN` clause.
 
 ## Why these are SQL files
 
