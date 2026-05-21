@@ -26,11 +26,6 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
   bypass for the one route that intentionally allows empty Origin
   pre-auth (`/localEvents`).
 
-  New regression test: `scripts/golden-localdev-sse.sh` (5 assertions
-  covering empty-Origin success, disallowed-Origin still-rejected,
-  allowed-Origin control case, `/ddb/run` no-Origin still-rejected,
-  `/ddb/run` allowed-Origin bypass active).
-
 ### Documentation
 
 - **`docs/WHY_HARBOR.md`** — new positioning doc answering the natural
