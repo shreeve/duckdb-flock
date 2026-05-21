@@ -30,7 +30,7 @@ pattern.
 
 | File | Why |
 |---|---|
-| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with harbor's `DUCKDB_CPP_EXTENSION_ENTRY(harbor, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`, plus the `~/.duckdb/extension_data/ui/` directory creation that the bundle's `_duckdb_ui` ATTACH depends on) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. The directory-creation piece was missed in the original PR-3 vendor and added in v0.2.0 after a user surfaced "Initialization Error: Catalog '_duckdb_ui' does not exist" on a fresh `~/.duckdb`. |
+| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with harbor's `DUCKDB_CPP_EXTENSION_ENTRY(harbor, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`, and the `~/.duckdb/extension_data/ui/` directory creation that the bundle's `_duckdb_ui` ATTACH depends on) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. Harbor's directory-creation walk includes `~/.duckdb` itself (upstream creates only the bottom two levels) because harbor can be loaded via `LOAD '/abs/path/...'` against a session where DuckDB hasn't yet populated the home extension dir. |
 
 ## Other vendored files — NO edits
 

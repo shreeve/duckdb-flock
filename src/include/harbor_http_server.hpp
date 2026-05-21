@@ -81,10 +81,11 @@ public:
 		CLOSED,      // Close() done; safe to destroy
 	};
 
-	// `unauthenticated` (v0.2): if true, all auth-bearing routes accept
+	// When `unauthenticated` is true, all auth-bearing routes accept
 	// requests without a credential and assign the synthetic
-	// `harbor.local-dev` principal. Triggered exclusively by
-	// `harbor_serve(uri, token := NULL)` on a loopback bind. See SPEC §7.
+	// `harbor.local-dev` principal. Triggered by
+	// `harbor_serve(uri, token := NULL)` on a loopback bind. See
+	// SPEC §7.
 	HarborHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token, bool unauthenticated);
 	~HarborHttpServer();
 
@@ -152,9 +153,8 @@ public:
 		return token;
 	}
 	// True iff `harbor_serve` was invoked with `token := NULL` on a
-	// loopback bind, opening the server to unauthenticated local
-	// connections. Snapshotted at server-start time; never changes
-	// while the server is running.
+	// loopback bind. Snapshotted at server-start; never changes while
+	// the server is running.
 	bool IsUnauthenticated() const {
 		return unauthenticated;
 	}

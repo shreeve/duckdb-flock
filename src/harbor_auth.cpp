@@ -26,18 +26,17 @@ namespace duckdb {
 
 namespace {
 // Forward declarations for the file-scope helpers below. AuthManager's
-// ctor (Stage 7 snapshot) needs them resolved earlier than the file
-// order would give us.
+// constructor needs them visible before their definitions further down.
 string GetSettingString(DatabaseInstance &db, const string &setting_name);
 bool IsBuiltinNopAuthz(const string &fn_name);
 } // namespace
 
 AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p, bool unauthenticated_p)
     : db(std::move(db_p)), server_token(std::move(server_token_p)), unauthenticated(unauthenticated_p) {
-	// v0.2 Stage 7 — snapshot authn/authz settings at server start.
-	// Locked-in for the lifetime of this AuthManager (= the running
-	// HarborHttpServer). Mid-process SET GLOBAL on these settings does
-	// NOT affect the running server; restart to apply.
+	// Snapshot the authn/authz function names at construction so per-
+	// request code does not re-read them. Locks the auth posture for
+	// the running server's lifetime; mid-process SET GLOBAL on these
+	// settings does not affect the running server. Restart to apply.
 	if (auto db_locked = db.lock()) {
 		auto resolve = [&](const char *primary, const char *quack_alias, const char *default_name) -> string {
 			auto v = GetSettingString(*db_locked, primary);
@@ -55,10 +54,9 @@ AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p,
 		    resolve("harbor_authorization_function", "quack_authorization_function", "harbor_nop_authorization");
 		snapshot_has_custom_authn_fn = snapshot_authn_fn_name != "harbor_check_token" &&
 		                                snapshot_authn_fn_name != "quack_check_token";
-		// Same semantic IsAdminAuthzCustomConfigured uses, but applied
-		// to the resolved snapshot. Aliases under a custom name are
-		// treated as the operator's policy; built-in nops (any case/
-		// schema-prefix variant) count as default.
+		// Aliases under a custom name are treated as operator policy;
+		// built-in nops (any case / schema-prefix variant) count as
+		// default. Same normalization IsBuiltinNopAuthz uses.
 		snapshot_has_custom_authz_fn = !IsBuiltinNopAuthz(snapshot_authz_fn_name);
 	}
 }
@@ -256,11 +254,10 @@ string AuthManager::GenerateRandomToken(DatabaseInstance &db) {
 }
 
 bool AuthManager::RunAuthentication(const string &session_id, const string &client_token) {
-	// v0.2 unauthenticated mode: skip the credential comparison entirely.
-	// Quack still parses the CONNECTION_REQUEST frame correctly (caller-side);
-	// only this comparison is skipped. Stock Quack clients sending a
-	// non-empty AuthString continue to connect (the comparison just
-	// short-circuits to true).
+	// In unauthenticated mode the credential comparison is skipped
+	// entirely; Quack's CONNECTION_REQUEST frame is still parsed by
+	// the caller, only the comparison short-circuits. Stock Quack
+	// clients sending a non-empty AuthString continue to connect.
 	if (unauthenticated) {
 		return true;
 	}
@@ -268,10 +265,9 @@ bool AuthManager::RunAuthentication(const string &session_id, const string &clie
 	if (!db_locked) {
 		return false;
 	}
-	// v0.2 Stage 7: use the snapshot resolved at server start, NOT a
-	// live setting read. Closes TOCTOU window where an authenticated
-	// caller could SET GLOBAL harbor_authentication_function mid-process
-	// to broaden auth.
+	// Use the snapshot resolved at server start, never a live setting
+	// read — that would let an authenticated caller redirect auth
+	// mid-process via SET GLOBAL.
 	const auto &fn_name = snapshot_authn_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(client_token), Value(server_token)};
@@ -321,9 +317,10 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	// Round-20 polish: only pay the two-setting-read cost when the
 	// query is actually __HARBOR_ADMIN__-prefixed. Non-admin /sql and
 	// /quack queries hit the fast resolve-fn path below directly.
-	// v0.2 Stage 7: snapshot-based "is custom authz configured?" check.
-	// Was IsAdminAuthzCustomConfigured(*db_locked) — live setting read,
-	// vulnerable to mid-process SET GLOBAL TOCTOU.
+	// Use the snapshotted "is custom authz configured?" flag — never
+	// a live setting read. Same rationale as RunAuthentication: an
+	// authenticated caller must not be able to SET GLOBAL the authz
+	// function mid-process and unlock admin endpoints for everyone.
 	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") && !snapshot_has_custom_authz_fn) {
 		bool allow_admin_without_authz = false;
 		Value allow_setting;
@@ -339,9 +336,8 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 		// returns true. This is the explicit operator opt-in path.
 	}
 
-	// v0.2 Stage 7: use the snapshot resolved at server start (NOT a
-	// live setting read) so authz is immutable for the running server's
-	// lifetime. Same TOCTOU rationale as RunAuthentication.
+	// Use the snapshot resolved at server start; authz is immutable
+	// for the running server's lifetime.
 	const auto &fn_name = snapshot_authz_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(query)};
@@ -462,11 +458,11 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 
 AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
                                             const string &synthetic_session_id) {
-	// v0.2 unauthenticated mode (harbor_serve(uri, token := NULL) on
-	// loopback): short-circuit before looking at any credentials. ALL
-	// presented credentials (Bearer / Cookie / X-Harbor-Token) are
-	// ignored — stale cookies must never produce a different principal
-	// than fresh requests, or audit-trail meaning is lost.
+	// In unauthenticated mode, short-circuit before inspecting any
+	// presented credentials. Bearer / Cookie / X-Harbor-Token are
+	// ignored unconditionally — a stale cookie must never produce a
+	// different principal than a fresh request, or audit-trail
+	// meaning is lost.
 	if (unauthenticated) {
 		AuthResult ar;
 		ar.ok = true;

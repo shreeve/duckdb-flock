@@ -46,10 +46,9 @@ session pool and auth model.
 > printed by `harbor_serve()`, the page POSTs to `/auth/login`, sets a
 > `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
 > request proxies through to `ui.duckdb.org`. For local dev only,
-> pass `token := NULL` to `harbor_serve()` (v0.2; replaces the v0.1
-> `harbor_local_dev_mode` setting) — the server refuses to start
-> unless bound to loopback, the token-paste step is skipped, and
-> all routes (`/sql`, `/quack`, `/ddb/*`, UI) accept the synthetic
+> pass `token := NULL` to `harbor_serve()` — the server refuses to
+> start unless bound to loopback, the token-paste step is skipped,
+> and all routes (`/sql`, `/quack`, `/ddb/*`, UI) accept the synthetic
 > `harbor.local-dev` principal.
 
 ## Quick Start
@@ -62,7 +61,7 @@ every user the install is one line:
 INSTALL harbor FROM community;
 LOAD harbor;
 
--- Start the server with one of three auth modes (v0.2):
+-- Start the server with one of three auth modes:
 CALL harbor_serve('harbor:127.0.0.1:9494');                    -- Mode 3: random token, default authn
 CALL harbor_serve('harbor:0.0.0.0:9494', token := 'my-secret'); -- Mode 2: operator-supplied token
 CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);     -- Mode 1: open dev (loopback only)

@@ -360,11 +360,11 @@ your client correctly) and 504 `QUERY_TIMEOUT` (you're hitting the
 - **`/localToken` only works on loopback bind**. If you bind on
   `0.0.0.0`, it's forced off as a safety measure.
 - **Mode 1 (`token := NULL`) requires loopback bind**. `harbor_serve`
-  refuses to start with `token := NULL` on a non-loopback bind. (In
-  v0.1.x this was the `harbor_local_dev_mode` SQL setting; v0.2
-  removed it in favor of the more explicit token-argument-as-mode
-  encoding. `SET GLOBAL harbor_local_dev_mode = ...` now hard-errors
-  with a migration message.)
+  refuses to start with `token := NULL` on a non-loopback bind. The
+  legacy `harbor_local_dev_mode` SQL setting was replaced by the more
+  explicit token-argument-as-mode encoding; `SET GLOBAL
+  harbor_local_dev_mode = ...` now hard-errors with a migration
+  message pointing at `token := NULL`.
 - **`harbor_serve` is single-server-per-process.** A second call before
   `harbor_stop` throws. Don't try to host two harbors from one duckdb
   CLI invocation.

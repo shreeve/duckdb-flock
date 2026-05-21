@@ -80,13 +80,14 @@ static void QuackServe(ClientContext &context, TableFunctionInput &data_p, DataC
 		return;
 	}
 
-	// PR-2: was QuackStorageExtensionInfo::GetState(*context.db).CreateServer(...).
-	// Now delegates to the process-global HarborServerState. Single-server-per-process
-	// per SPEC §2 — a second quack_serve while one is running throws.
+	// Delegates to the process-global HarborServerState. Single-server-
+	// per-process per SPEC §2 — a second quack_serve while one is
+	// running throws.
 	//
-	// `quack_serve(uri, token)` always supplies a string token (the upstream
-	// surface never had a NULL/unauthenticated mode), so unauthenticated=false
-	// here. Operators wanting unauthenticated mode use harbor_serve(..., token := NULL).
+	// `quack_serve(uri, token)` always supplies a string token (the
+	// upstream Quack surface has no unauthenticated mode), so
+	// unauthenticated=false here. Operators wanting unauthenticated
+	// mode use harbor_serve(..., token := NULL).
 	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token,
 	                                  /*unauthenticated=*/false);
 

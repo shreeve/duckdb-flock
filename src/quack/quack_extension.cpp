@@ -192,25 +192,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 		// Best-effort; harbor_serve will still surface a clear error.
 	}
 
-	// PR-3 follow-up (vendored from upstream `duckdb-ui` LoadInternal,
-	// `misc/duckdb-ui/src/ui_extension.cpp` ll. 105-107): ensure
-	// `~/.duckdb/extension_data/ui/` exists. The DuckDB UI's JavaScript
-	// bundle expects this directory at startup so it can ATTACH
-	// `<path>/ui.db AS _duckdb_ui` for its own state (notebooks, query
-	// history, settings). DuckDB's ATTACH creates the file on first use,
-	// but it does NOT create missing parent directories, so a fresh
-	// machine — or one whose `~/.duckdb` was wiped — would fail with
-	// `Initialization Error: Catalog "_duckdb_ui" does not exist`. This
-	// piece of upstream's `LoadInternal` was missed when we vendored the
-	// UI server portion in PR-3 (see docs/upstream-ui-patches.md); it
-	// surfaced when a user wiped `~/.duckdb` to test v0.2.0 and got the
-	// "Failed to resolve app state with user" modal.
+	// Ensure `~/.duckdb/extension_data/ui/` exists. The DuckDB UI's
+	// JavaScript bundle ATTACHes `<that path>/ui.db AS _duckdb_ui` at
+	// startup for its own state (notebooks, query history, settings).
+	// DuckDB's ATTACH creates the file on first use but does NOT
+	// create missing parent directories, so without this the UI fails
+	// with "Initialization Error: Catalog '_duckdb_ui' does not exist"
+	// on a machine whose `~/.duckdb` was wiped or never populated.
 	//
-	// Note: harbor's call differs from upstream's by also creating
-	// `~/.duckdb` itself first. Upstream relies on DuckDB's own startup
-	// to have created it (extension cache); harbor is loaded via
-	// `LOAD '/abs/path/...'` which doesn't always touch the home
-	// extension dir, so we may run before `~/.duckdb` exists.
+	// Walk all three levels because harbor can be loaded via
+	// `LOAD '/abs/path/...'` against a session where DuckDB itself
+	// hasn't yet touched `~/.duckdb` — upstream `duckdb-ui::LoadInternal`
+	// only creates the bottom two levels because its startup path
+	// guarantees `~/.duckdb` already exists.
 	try {
 		auto &fs = FileSystem::GetFileSystem(loader.GetDatabaseInstance());
 		auto ensure_dir = [&](const string &raw_path) {
@@ -223,9 +217,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		ensure_dir("~/.duckdb/extension_data");
 		ensure_dir("~/.duckdb/extension_data/ui");
 	} catch (...) {
-		// Best-effort. If the OS denies the create (read-only home dir,
-		// non-existent home, sandbox), the UI-init path will still
-		// surface a clearer error to the operator.
+		// Best-effort. A read-only home, non-existent home, or sandbox
+		// can deny the create; the UI-init path will surface a
+		// clearer error if that happens.
 	}
 
 	// harbor-specific: SELECT harbor_version() as the smoke-test surface.
@@ -340,24 +334,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
-	// v0.2: harbor_local_dev_mode was removed. Setting it now raises a
-	// hard error pointing at the replacement. We deliberately reject any
-	// attempt — including `SET GLOBAL harbor_local_dev_mode = false` —
-	// so stale configs surface loudly instead of silently doing nothing.
-	// The replacement (`harbor_serve(uri, token := NULL)`) covers the
-	// same use case AND opens auth bypass to /sql + /quack uniformly,
-	// not just the UI surface (which was the v0.1 asymmetry footgun).
+	// `harbor_local_dev_mode` is intentionally rejected on SET. It was
+	// the v0.1 trigger for the UI-only auth bypass; harbor's
+	// unauthenticated mode now lives on `harbor_serve(uri, token :=
+	// NULL)` and applies uniformly to `/sql`, `/quack`, `/ddb/*`, and
+	// `/localEvents`. Both `SET GLOBAL ... = true` and `... = false`
+	// hard-error so a stale config is surfaced loudly rather than
+	// silently doing nothing.
 	config.AddExtensionOption(
 	    "harbor_local_dev_mode",
-	    "REMOVED in v0.2. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
+	    "Removed. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false),
 	    [](ClientContext &, SetScope, Value &) {
 		    throw InvalidInputException(
-		        "harbor_local_dev_mode was removed in harbor v0.2. To run an unauthenticated harbor on a loopback "
+		        "harbor_local_dev_mode is no longer supported. To run an unauthenticated harbor on a loopback "
 		        "bind, pass NULL for the token instead:\n"
 		        "    CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);\n"
-		        "Unlike the v0.1 setting (which only relaxed auth on the UI surface), token := NULL applies "
-		        "uniformly to /sql, /quack, /ddb/*, and /localEvents.");
+		        "Unlike the previous setting (which only relaxed auth on the UI surface), token := NULL "
+		        "applies uniformly to /sql, /quack, /ddb/*, and /localEvents.");
 	    },
 	    SetScope::GLOBAL);
 

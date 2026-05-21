@@ -167,13 +167,11 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 			}
 			return fallback;
 		};
-		// PR-6 follow-up (round 19): use the single-source-of-truth
-		// "is admin authz custom configured?" rule from AuthManager.
-		// v0.2 Stage 7: now reads from AuthManager's snapshot rather
-		// than a live setting query, so the start-time WARN log
-		// reflects the locked-in policy (mid-process SET GLOBAL on
-		// the authz function setting cannot affect this WARN's accuracy
-		// because it cannot affect the running server's authz at all).
+		// Single-source-of-truth "is admin authz custom configured?"
+		// rule from AuthManager. Reads the snapshot, not a live
+		// setting — so the WARN log reflects the locked-in policy,
+		// and any later SET GLOBAL on authz settings cannot diverge
+		// what the log said from what the running server enforces.
 		bool custom_authz_configured = auth->HasCustomAuthzConfigured();
 		bool allow_admin_without_authz = setting_bool_or("harbor_allow_admin_without_authz", false);
 		if (allow_admin_without_authz && !custom_authz_configured) {

@@ -35,7 +35,7 @@
 //       Authorization: Bearer / X-Harbor-Token. AuthManager runs
 //       harbor_authentication_function for explicit-bearer paths;
 //       cookie verify is HMAC-only.
-//     - Local-dev bypass (v0.2): harbor_serve(..., token := NULL) on a
+//     - Unauthenticated bypass: harbor_serve(..., token := NULL) on a
 //       loopback bind → use the synthetic principal "harbor.local-dev"
 //       so connection-pool keying still behaves like every other
 //       authenticated path.
@@ -167,8 +167,8 @@ private:
 	bool IsBoundLocally() const;
 
 	// True iff harbor was started with harbor_serve(..., token := NULL),
-	// i.e. unauthenticated mode. Snapshotted at server-start time
-	// (v0.2: settings are immutable for a running server's lifetime).
+	// i.e. unauthenticated mode. Snapshotted at server-start; settings
+	// are immutable for the running server's lifetime.
 	bool LocalDevMode() const;
 
 	// Authenticate a UI request. Returns the AuthResult from

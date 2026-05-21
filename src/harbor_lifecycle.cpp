@@ -18,9 +18,9 @@ struct HarborLifecycleBindData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
-	// v0.2: true iff the operator passed `token := NULL`, putting harbor
-	// into unauthenticated mode. Empty token in this case; HarborHttpServer
-	// uses this flag (not the empty token) to decide auth-bypass behavior.
+	// True iff the operator passed `token := NULL` (unauthenticated
+	// mode). Token is empty in that case; HarborHttpServer uses this
+	// flag — not the empty token — to decide auth-bypass behavior.
 	bool unauthenticated = false;
 };
 
@@ -65,19 +65,17 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
-	// v0.2 Stage 4: custom-authn + token-arg incompatibility check.
+	// Custom-authn + token-arg incompatibility check.
 	//
-	// If the operator has set `harbor_authentication_function` to a
-	// custom callback, the static `token` argument is dead config: the
-	// callback decides validity, not the static comparison. Silently
-	// honoring `token := 'x'` in that case would mislead operators who
-	// expect to see the returned auto-token in a Bearer header. Hard-
-	// error so the contradiction surfaces at config time.
+	// If a custom `harbor_authentication_function` is configured, the
+	// static `token` argument is dead config: the callback decides
+	// validity, not the static comparison. Silently honoring
+	// `token := 'x'` in that case would mislead operators who expect
+	// to use the returned token as a Bearer credential. Hard-error
+	// here so the contradiction surfaces at config time.
 	//
-	// We inspect the SQL setting once at bind time. AuthManager will
-	// use the same setting at request time (snapshot via the running
-	// process — DuckDB settings can be SET GLOBAL after harbor_serve
-	// returns, but Stage 3's snapshot semantics will lock that down).
+	// AuthManager snapshots the same setting at server-start, so what
+	// we see here matches what the running server will use.
 	bool has_custom_authn_fn = false;
 	{
 		auto db_locked = context.db ? context.db : nullptr;
@@ -111,25 +109,21 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 		    "        CALL harbor_serve('uri', token := 'your-secret');");
 	}
 
-	// v0.2 token semantics on harbor_serve(uri, token := <value>):
+	// Token semantics on harbor_serve(uri, token := <value>):
 	//
-	//   omitted          → auto-generate a random token (default authn,
-	//                      same behavior as v0.1).
-	//   token := 'x'     → use 'x' as the static token (default authn,
-	//                      same behavior as v0.1).
-	//   token := NULL    → unauthenticated mode. All auth-bearing routes
-	//                      accept any caller and assign the synthetic
-	//                      'harbor.local-dev' principal. Refuses to start
-	//                      unless the bind is loopback. Replaces the
-	//                      v0.1 `harbor_local_dev_mode` SQL setting.
-	//   token := ''      → hard error. Empty string is almost always an
-	//                      env-var-plumbing accident; reject loudly.
+	//   omitted          → auto-generate a random token (default authn).
+	//   token := 'x'     → use 'x' as the static token (default authn).
+	//   token := NULL    → unauthenticated mode. All auth-bearing
+	//                      routes accept any caller and assign the
+	//                      synthetic 'harbor.local-dev' principal.
+	//                      Refuses to start unless bound to loopback.
+	//   token := ''      → hard error. Empty string is almost always
+	//                      an env-var-plumbing accident; reject loudly.
 	//
-	// Note: DuckDB's named-parameter binder implicitly casts numeric and
-	// boolean values to strings (e.g. `token := 12345` → `token := '12345'`)
-	// before this code sees them. That's a DuckDB-layer quirk, not a
-	// harbor security gap — the resulting string is still a token of
-	// the operator's choosing.
+	// DuckDB's named-parameter binder implicitly casts numeric and
+	// boolean values to strings (e.g. `token := 12345` becomes
+	// `token := '12345'`) before this code sees them. The resulting
+	// string is still a deliberate token of the operator's choosing.
 	auto token_iter = input.named_parameters.find("token");
 	if (token_iter == input.named_parameters.end()) {
 		if (has_custom_authn_fn) {
@@ -189,10 +183,10 @@ void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
-	// auth_token column is NULL when there's no token for the operator
-	// to copy: unauthenticated mode (no auth at all) or custom-authn
-	// mode (the custom callback decides; the server token is dead
-	// config). A placeholder like '' or '(none)' would be misleading.
+	// auth_token is NULL when there is no token the operator should
+	// care about: unauthenticated mode (no auth) or custom-authn mode
+	// (the callback decides, server token is dead config). A
+	// placeholder like '' or '(none)' would be misleading.
 	if (bind_data.token.empty()) {
 		output.SetValue(2, 0, Value(LogicalType::VARCHAR));
 	} else {

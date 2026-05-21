@@ -1,9 +1,9 @@
 # harbor auth callback recipes
 
-These recipes implement **Mode 3** of harbor's v0.2 three-mode auth
-model (custom `harbor_authentication_function`). The other two modes
-are: **Mode 1** (`harbor_serve(uri, token := NULL)` — open dev,
-loopback only) and **Mode 2** (`harbor_serve(uri, token := 'x')` —
+These recipes implement **Mode 3** of harbor's three-mode auth model
+(custom `harbor_authentication_function`). The other two modes are
+**Mode 1** (`harbor_serve(uri, token := NULL)` — open dev, loopback
+only) and **Mode 2** (`harbor_serve(uri, token := 'x')` —
 operator-supplied or auto-generated static token).
 
 The default `harbor_authentication_function` accepts the static token

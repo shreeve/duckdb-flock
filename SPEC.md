@@ -717,12 +717,12 @@ is a harbor addition; upstream just clears the result).
 
 ## 7. Authentication and authorization
 
-### Three auth modes (v0.2)
+### Three auth modes
 
 The auth posture is determined entirely by the `token` argument to
-`harbor_serve`. No separate `mode` enum, no `harbor_local_dev_mode`
-SQL setting (the v0.1 setting was removed; SET on it now hard-errors
-with a migration message).
+`harbor_serve`. No separate `mode` enum and no `harbor_local_dev_mode`
+SQL setting; SET on `harbor_local_dev_mode` hard-errors with a
+migration message pointing at `token := NULL`.
 
 | Form | Mode | Behavior |
 |---|---|---|
@@ -732,16 +732,16 @@ with a migration message).
 | `harbor_serve('uri', token := '')` | — | **Hard error.** Empty string is almost always an env-var-plumbing accident; rejected loudly with a migration-teaching message. |
 | Custom `harbor_authentication_function` set + any `token` argument | — | **Hard error.** The custom callback decides validity; a static token would be dead config that misleads operators. Either omit `token` (callback decides) or unset the custom callback (use static-token auth). |
 
-#### Authn function snapshot (v0.2 invariant)
+#### Authn function snapshot
 
 The resolved values of `harbor_authentication_function` and
-`harbor_authorization_function` (with `quack_*` fallbacks +
+`harbor_authorization_function` (with `quack_*` fallbacks plus the
 `harbor_check_token` / `harbor_nop_authorization` defaults) are
 captured ONCE at `harbor_serve` startup and used for the running
 server's lifetime. `SET GLOBAL` on these settings while a server is
-running has NO effect until the next `harbor_serve`. This closes the
-TOCTOU window where an authenticated SQL caller could change the
-authn function mid-process and broaden auth for everyone else.
+running has NO effect until the next `harbor_serve`. Without this
+snapshot, an authenticated SQL caller could change the authn
+function mid-process and broaden auth for everyone else.
 
 #### Authorization is orthogonal
 
@@ -1226,7 +1226,7 @@ DuckDB's own `duckdb_logs_parsed('Harbor')` for structured stats.
 
 | Versioned thing | harbor's commitment |
 |---|---|
-| **DuckDB engine** | Each harbor release pins to a specific DuckDB version (v0.2.0 pins v1.5.3; v0.1.x pinned v1.5.2). Cross-version load is refused with a clear error. |
+| **DuckDB engine** | Each harbor release pins to a specific DuckDB version. Cross-version load is refused with a clear error. |
 | **Quack wire protocol** | Tracks upstream `duckdb/duckdb-quack`. Each rebase point is recorded in `BUILD.md` with the upstream commit. We do not promise wire compatibility across rebase points until DuckDB v2.0 GA. |
 | **DuckDB UI protocol** | Tracks upstream `duckdb/duckdb-ui`. Same caveat as Quack. |
 | **harbor `/sql` JSON format** | Semantic versioning. Added fields and added type encodings are minor; removed fields, changed shapes, or changed type semantics are major. |

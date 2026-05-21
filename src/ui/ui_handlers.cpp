@@ -157,20 +157,18 @@ bool UiHandlers::IsBoundLocally() const {
 }
 
 bool UiHandlers::LocalDevMode() const {
-	// v0.2: snapshotted at server start (via harbor_serve(..., token := NULL)),
-	// not read from a SQL setting. This avoids mid-process mutation
-	// races and makes the auth posture immutable for the lifetime of
-	// a running server.
+	// Snapshotted at server start (via `harbor_serve(..., token := NULL)`),
+	// not read from a SQL setting — avoids mid-process mutation races
+	// and keeps the auth posture immutable for the running server's
+	// lifetime.
 	return server.IsUnauthenticated();
 }
 
 namespace {
 
-// v0.2: synthetic principal for unauthenticated mode lives on
-// AuthManager (AuthManager::LocalDevPrincipalId()) so /sql, /quack,
-// admin, and UI all reach the same constant. The local copy that
-// previously lived here was dead after AuthorizeUiRequest's local-
-// dev fallback moved into AuthenticateRequest.
+// The synthetic principal for unauthenticated mode lives on
+// AuthManager (`AuthManager::LocalDevPrincipalId()`) so /sql, /quack,
+// admin, and UI all reach the same constant.
 
 // Minimal harbor login page. Inline HTML+CSS+JS so we don't need a
 // separate asset pipeline. The page POSTs the user-pasted token to
@@ -345,21 +343,16 @@ std::string UiHandlers::ScopedConnectionKey(const std::string &principal_id, con
 }
 
 AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool require_origin_allowed) {
-	// In v0.1 this function carried a local-dev fallback that synthesized
-	// a `harbor.local-dev` principal when AuthenticateRequest failed AND
-	// harbor_local_dev_mode was true AND the bind was loopback. In v0.2
-	// that fallback moved into AuthManager::AuthenticateRequest itself
-	// so /sql, /quack, /ddb/*, admin all honor unauthenticated mode
-	// uniformly — no UI-only asymmetry. When the server was started with
+	// Delegates to AuthManager. When the server was started with
 	// `harbor_serve(uri, token := NULL)` on a loopback bind,
-	// AuthenticateRequest returns ok=true with the synthetic principal
-	// before this function sees the request.
+	// AuthenticateRequest short-circuits to the synthetic principal
+	// before this function sees the request, so /sql, /quack,
+	// /ddb/*, and admin all honor unauthenticated mode uniformly.
 	//
 	// `require_origin_allowed` is preserved as a parameter for future
-	// use; today this function delegates entirely to AuthManager.
-	// Origin checks for browser-CSRF live in the route handlers
+	// use; Origin checks for browser-CSRF live in the route handlers
 	// (HandleRun, HandleTokenize, HandleInterrupt, the /localEvents
-	// route lambda) where they belong.
+	// route lambda).
 	(void)require_origin_allowed;
 	return auth.AuthenticateRequest(req, "__HARBOR_AUTH__:ddb");
 }
