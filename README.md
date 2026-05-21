@@ -53,17 +53,22 @@ session pool and auth model.
 
 ## Quick Start
 
-```sql
--- Today, from a local build:
-LOAD '/path/to/build/release/extension/harbor/harbor.duckdb_extension';
+`harbor` is published in the [DuckDB community extensions
+registry](https://duckdb.org/community_extensions/), so for nearly
+every user the install is one line:
 
--- After community publication (planned):
--- INSTALL harbor FROM community;
--- LOAD harbor;
+```sql
+INSTALL harbor FROM community;
+LOAD harbor;
 
 -- Start the server (returns the URI, URL, and a generated token)
 CALL harbor_serve('harbor:127.0.0.1:9494');
 ```
+
+> Building from source instead? Replace the `INSTALL` line with
+> `LOAD '/path/to/build/release/extension/harbor/harbor.duckdb_extension';`
+> and start DuckDB with `duckdb -unsigned` (community-installed
+> binaries are signed and don't need the flag).
 
 ```
 ┌─────────────────────────────┬───────────────────────┬─────────────────────────────────┐

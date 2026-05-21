@@ -15,10 +15,35 @@ or a container under Docker / Incus / Kubernetes.
 
 ## 1 — Local laptop quickstart
 
-Pick the right binary for your machine from the
-[v0.1.0 release page](https://github.com/shreeve/duckdb-harbor/releases/tag/v0.1.0):
+The fastest path is the community-extensions install — DuckDB
+downloads, signs, and caches the binary for your platform
+automatically. No `-unsigned` flag, no manual download.
 
-| Your laptop | Download |
+Make sure DuckDB v1.5.2 is installed (any newer 1.5.x works for the
+`duckdb-quack v1.5-variegata` line; v2.x will need a rebuild
+post-rebase).
+
+### Smoke run (preferred — community install)
+
+```bash
+duckdb <<'SQL'
+INSTALL harbor FROM community;
+LOAD harbor;
+CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_wait();
+SQL
+```
+
+That's it. `harbor_serve` prints the auto-generated bearer token —
+copy it, then continue at the [token-use section](#token-use).
+
+### Smoke run (alternative — local build or pre-release binary)
+
+If you're tracking `main` ahead of the next community-extensions
+release, or if you want to validate a specific GitHub-Release
+artifact, point `LOAD` at a binary on disk:
+
+| Your laptop | Download from [the release page](https://github.com/shreeve/duckdb-harbor/releases) |
 |---|---|
 | macOS Apple Silicon (M-series) | `harbor.osx_arm64.duckdb_extension` |
 | macOS Intel | `harbor.osx_amd64.duckdb_extension` |
@@ -26,33 +51,29 @@ Pick the right binary for your machine from the
 | Linux ARM64 | `harbor.linux_arm64.duckdb_extension` |
 | Windows x86_64 (PowerShell) | `harbor.windows_amd64.duckdb_extension` |
 
-> If you already have `git clone --recurse-submodules`-ed the repo and
-> ran `make release`, your local binary is at
-> `build/release/extension/harbor/harbor.duckdb_extension` — same thing,
-> just locally built.
-
-Make sure DuckDB v1.5.2 is installed (any newer 1.5.x works for the
-`duckdb-quack v1.5-variegata` line; v2.x will need a rebuild
-post-rebase).
-
-### Smoke run
+> If you `git clone --recurse-submodules`-ed the repo and ran
+> `make release`, your local binary is at
+> `build/release/extension/harbor/harbor.duckdb_extension` — same
+> thing, just locally built.
 
 ```bash
-# wherever your binary lives:
 EXT=$HOME/Downloads/harbor.osx_arm64.duckdb_extension
 
-duckdb -unsigned <<'SQL'
-LOAD '/Users/me/Downloads/harbor.osx_arm64.duckdb_extension';
+duckdb -unsigned <<SQL
+LOAD '$EXT';
 CALL harbor_serve('harbor:127.0.0.1:9494');
 CALL harbor_wait();
 SQL
 ```
 
-`-unsigned` is required because v0.1.0 binaries aren't yet signed by
-DuckDB's community-extensions signing key (PR
-[duckdb/community-extensions#1917](https://github.com/duckdb/community-extensions/pull/1917)
-is the gate). After that PR merges and you `INSTALL harbor FROM
-community;` you can drop the flag.
+`-unsigned` is required for the local-binary path because
+GitHub-Release artifacts aren't signed with DuckDB's
+community-extensions key — only the binary served by
+`INSTALL harbor FROM community;` is signed.
+
+<a name="token-use"></a>
+
+### Token use
 
 `harbor_serve` prints the auto-generated bearer token. Copy it. From
 another terminal:
@@ -348,9 +369,10 @@ your client correctly) and 504 `QUERY_TIMEOUT` (you're hitting the
 - **`SET GLOBAL` not `SET`** for any auth-related setting. Auth runs
   in transient connections that don't see session-local settings.
   This is the most-common silent misconfiguration.
-- **`-unsigned` flag on `duckdb`** until the community-extensions PR
-  merges. Without it, DuckDB refuses to load community-built extensions
-  by default.
+- **`-unsigned` flag on `duckdb`** is needed only for the
+  local-binary path (`LOAD '/path/to/harbor.duckdb_extension'`).
+  The community-extensions install path (`INSTALL harbor FROM
+  community; LOAD harbor;`) is signed and works without the flag.
 - **`CALL harbor_wait();`** at the end of every non-interactive
   invocation. Without it, `duckdb -c "..."` exits as soon as the last
   statement returns and tears down the harbor server.

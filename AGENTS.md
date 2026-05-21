@@ -47,7 +47,7 @@ incrementally.
 | **PR-7c** (merged) | Auth scheme tightening + login-page CSP+nonce. New `UNSUPPORTED_AUTH_SCHEME` errorCode for non-Bearer `Authorization`. Login page `Content-Security-Policy: default-src 'none'; script-src 'nonce-<csprng>'; …`, per-request 16-byte standard-base64 nonce. `RandomBytes` failure returns 500. | (none) |
 | **PR-7d** (merged) | Full nested-type Mode B param parser for `/sql`: `LIST<T>`, `ARRAY<T,N>`, `MAP<K,V>`, `STRUCT(name1 type1, ...)`. STRUCT decoding hardened (case-insensitive lookup, duplicate-key rejection, missing-field NULL, extra-key rejection). MAP shape: array-of-pairs. Whitespace-tolerant. Recursion cap 32; type string cap 4 KiB. | UNION (clean BAD_REQUEST for v0.1); DuckDB shorthand `T[]` / `INTEGER[3]`; quoted struct field names. |
 | **PR-7e** (merged) | Per-DuckDB-type `/sql` encoding round-trip — new `golden-sql-types.sh` (62 assertions). Latent encoder bug fix for `TIMESTAMP_S`/`TIMESTAMP_MS` (unit confusion). | `test/golden/quack/` + `test/golden/ui/` byte-level fixtures (post-v0.1 — runtime compat already covered by `test/sql/harbor.test`); spatial GEOMETRY. |
-| **PR-7f** (active) | v0.1 docs polish + community-extensions submission readiness. Actual submission opens in `duckdb/community-extensions`. | (none) |
+| **PR-7f** (merged) | v0.1 docs polish + community-extensions submission readiness. **Submission landed**: `duckdb/community-extensions` PR [#1917](https://github.com/duckdb/community-extensions/pull/1917) merged 2026-05-18 (initial listing); PR [#1927](https://github.com/duckdb/community-extensions/pull/1927) merged 2026-05-19 (bump to v0.1.2). `INSTALL harbor FROM community;` works for end users. | (none) |
 | **Post-v0.1+** | Bundled UI assets mode; `HARBOR_COOKIE_SIGNING_KEY` env var; `/sql` errorCode translation for `UNSUPPORTED_AUTH_SCHEME`; error envelope normalization; mbedTLS/HTTPUtil migration only on PR-10b trigger. | |
 | ~~**PR-10b**~~ | **EVALUATED AND DECLINED** for v0.1 — see "PR-10b: declined" below. The OpenSSL/cpp-httplib architectural cleanup was originally planned post-PR-7. After the round-13/round-14 architectural review reduced its scope (vcpkg deps stay; the only concrete win is dropping harbor's *direct* libssl/libcrypto link), the cost-benefit no longer justified the migration risk. May be revisited under specific trigger conditions; see the dedicated section below. | n/a |
 
@@ -628,7 +628,13 @@ src/*.cpp ──► CMake ──► build/release/extension/harbor/harbor.duckdb
 ```
 
 The extension is a single `.duckdb_extension` file. Distribution is via
-DuckDB's community extension repo (planned) and GitHub Releases (today).
+DuckDB's community-extensions registry
+(`INSTALL harbor FROM community;`, signed, the default path for
+end users — community-extensions PR
+[#1917](https://github.com/duckdb/community-extensions/pull/1917)
+merged 2026-05-18) and GitHub Releases (per-platform unsigned
+artifacts attached to each tag, used for ahead-of-registry testing
+or when `INSTALL` isn't available).
 
 ## Repository layout
 

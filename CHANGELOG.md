@@ -6,8 +6,33 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Distribution
+
+- **`INSTALL harbor FROM community;` is now the default install path.**
+  `duckdb/community-extensions` accepted harbor at v0.1.2:
+  [PR #1917](https://github.com/duckdb/community-extensions/pull/1917)
+  merged 2026-05-18 (initial listing) and
+  [PR #1927](https://github.com/duckdb/community-extensions/pull/1927)
+  merged 2026-05-19 (bump to v0.1.2). The community binary is signed
+  with DuckDB's community-extensions key, so `-unsigned` is no longer
+  required for the standard install — only the GitHub-Release
+  artifacts (unsigned, used for ahead-of-registry testing) still
+  need the flag.
+
 ### Documentation
 
+- **`README.md` Quick Start** — `INSTALL harbor FROM community;`
+  promoted to the primary install instruction; the local-build /
+  GitHub-Release path moved to a subordinate "building from source"
+  callout.
+- **`docs/DEPLOYMENT.md` §1 Local quickstart** — split into two
+  smoke-run paths: "preferred (community install)" leads, "alternative
+  (local build or pre-release binary)" follows. The `-unsigned`-flag
+  gotcha is rewritten to scope only to the local-binary path.
+- **`AGENTS.md`** — PR-7f status flipped to `(merged)` with the actual
+  community-extensions PR numbers; "Distribution is via … (planned)
+  and GitHub Releases (today)" replaced with the merged-and-live
+  state.
 - **`docs/WHY_HARBOR.md`** — new positioning doc answering the natural
   evaluator question "isn't this just the Quack extension + an
   httpserver extension + the DuckDB UI extension?" Covers what each
