@@ -366,25 +366,11 @@ AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool requ
 	if (result.ok) {
 		return result;
 	}
-	// Local-dev escape — only when ALL of:
-	//   - harbor_local_dev_mode = true
-	//   - bind host is loopback
-	//   - (if require_origin_allowed) the request's Origin is in
-	//     our allowed-origins set OR is empty (same-origin)
-	//
-	// Empty-Origin handling here mirrors the /localEvents pre-auth
-	// gate (v0.1.1 fix): per the Fetch spec, browsers do NOT send
-	// Origin for same-origin no-cors requests like
-	// `new EventSource('/localEvents')`. Treating empty Origin as
-	// "implicitly same-origin and OK" is what lets the local-dev
-	// bypass survive that browser behavior. For routes whose
-	// pre-auth gate (e.g. /ddb/run, /ddb/tokenize, /ddb/interrupt)
-	// already rejects empty-Origin requests, this branch is
-	// unreachable for those routes and the security posture is
-	// unchanged. For /localEvents (whose pre-auth gate explicitly
-	// allows empty Origin), this fix is what closes the
-	// "Connection to DuckDB Lost" loop the UI hits in
-	// harbor_local_dev_mode = true on a fresh ephemeral DB.
+	// Local-dev escape — only when harbor_local_dev_mode = true,
+	// bound to loopback, and (if Origin is required) Origin is
+	// allow-listed. Empty Origin counts as same-origin: browsers
+	// omit Origin on same-origin no-cors requests like
+	// `new EventSource('/localEvents')`.
 	if (!LocalDevMode() || !IsBoundLocally()) {
 		return result;
 	}
