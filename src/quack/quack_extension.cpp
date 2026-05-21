@@ -29,6 +29,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -189,6 +190,29 @@ static void LoadInternal(ExtensionLoader &loader) {
 		ExtensionHelper::AutoLoadExtension(loader.GetDatabaseInstance(), "httpfs");
 	} catch (...) {
 		// Best-effort; harbor_serve will still surface a clear error.
+	}
+
+	// PR-3 follow-up (vendored from upstream `duckdb-ui` LoadInternal,
+	// `misc/duckdb-ui/src/ui_extension.cpp` ll. 105-107): ensure
+	// `~/.duckdb/extension_data/ui/` exists. The DuckDB UI's JavaScript
+	// bundle expects this directory at startup so it can ATTACH
+	// `<path>/ui.db AS _duckdb_ui` for its own state (notebooks, query
+	// history, settings). DuckDB's ATTACH creates the file on first use,
+	// but it does NOT create missing parent directories, so a fresh
+	// machine — or one whose `~/.duckdb` was wiped — would fail with
+	// `Initialization Error: Catalog "_duckdb_ui" does not exist`. This
+	// piece of upstream's `LoadInternal` was missed when we vendored the
+	// UI server portion in PR-3 (see docs/upstream-ui-patches.md); it
+	// surfaced when a user wiped `~/.duckdb` to test v0.2.0 and got the
+	// "Failed to resolve app state with user" modal.
+	try {
+		auto &fs = FileSystem::GetFileSystem(loader.GetDatabaseInstance());
+		fs.CreateDirectory(fs.ExpandPath("~/.duckdb/extension_data"));
+		fs.CreateDirectory(fs.ExpandPath("~/.duckdb/extension_data/ui"));
+	} catch (...) {
+		// Best-effort. If the OS denies the create (read-only home dir,
+		// non-existent home, sandbox), the UI-init path will still
+		// surface a clearer error to the operator.
 	}
 
 	// harbor-specific: SELECT harbor_version() as the smoke-test surface.
