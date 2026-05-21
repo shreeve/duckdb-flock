@@ -205,10 +205,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// UI server portion in PR-3 (see docs/upstream-ui-patches.md); it
 	// surfaced when a user wiped `~/.duckdb` to test v0.2.0 and got the
 	// "Failed to resolve app state with user" modal.
+	//
+	// Note: harbor's call differs from upstream's by also creating
+	// `~/.duckdb` itself first. Upstream relies on DuckDB's own startup
+	// to have created it (extension cache); harbor is loaded via
+	// `LOAD '/abs/path/...'` which doesn't always touch the home
+	// extension dir, so we may run before `~/.duckdb` exists.
 	try {
 		auto &fs = FileSystem::GetFileSystem(loader.GetDatabaseInstance());
-		fs.CreateDirectory(fs.ExpandPath("~/.duckdb/extension_data"));
-		fs.CreateDirectory(fs.ExpandPath("~/.duckdb/extension_data/ui"));
+		auto ensure_dir = [&](const string &raw_path) {
+			auto path = fs.ExpandPath(raw_path);
+			if (!fs.DirectoryExists(path)) {
+				fs.CreateDirectory(path);
+			}
+		};
+		ensure_dir("~/.duckdb");
+		ensure_dir("~/.duckdb/extension_data");
+		ensure_dir("~/.duckdb/extension_data/ui");
 	} catch (...) {
 		// Best-effort. If the OS denies the create (read-only home dir,
 		// non-existent home, sandbox), the UI-init path will still
