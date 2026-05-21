@@ -98,6 +98,16 @@ public:
 	// authz format).
 	static const string &LocalDevPrincipalId();
 
+	// True iff the operator configured a non-default
+	// harbor_authorization_function at server start. Snapshotted at
+	// AuthManager construction; immutable for the running server's
+	// lifetime. Use this from request handlers and from the start-time
+	// "loud WARN log" path; do NOT call IsAdminAuthzCustomConfigured(db)
+	// per request (that path reads live settings — TOCTOU window).
+	bool HasCustomAuthzConfigured() const {
+		return snapshot_has_custom_authz_fn;
+	}
+
 	AuthManager(const AuthManager &) = delete;
 	AuthManager &operator=(const AuthManager &) = delete;
 
@@ -226,6 +236,19 @@ private:
 	weak_ptr<DatabaseInstance> db;
 	string server_token;
 	bool unauthenticated;
+
+	// v0.2 Stage 7 (snapshot at server start, per GPT-5.5 round-26
+	// blocker): the authn/authz function names are resolved ONCE at
+	// AuthManager construction time and stored on the instance. Request
+	// handlers MUST use these snapshots — they MUST NOT re-read
+	// `harbor_authentication_function` / `harbor_authorization_function`
+	// per request. This closes the TOCTOU window where an authenticated
+	// SQL caller could `SET GLOBAL harbor_authentication_function = 'allow_all'`
+	// mid-process and silently broaden auth for everyone else.
+	string snapshot_authn_fn_name;
+	string snapshot_authz_fn_name;
+	bool snapshot_has_custom_authn_fn = false;
+	bool snapshot_has_custom_authz_fn = false;
 
 	std::mutex signing_key_mutex;
 	std::vector<uint8_t> signing_key; // 32 random bytes; init on first IssueCookie/VerifyCookie call

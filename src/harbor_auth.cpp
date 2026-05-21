@@ -24,8 +24,43 @@
 
 namespace duckdb {
 
+namespace {
+// Forward declarations for the file-scope helpers below. AuthManager's
+// ctor (Stage 7 snapshot) needs them resolved earlier than the file
+// order would give us.
+string GetSettingString(DatabaseInstance &db, const string &setting_name);
+bool IsBuiltinNopAuthz(const string &fn_name);
+} // namespace
+
 AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p, bool unauthenticated_p)
     : db(std::move(db_p)), server_token(std::move(server_token_p)), unauthenticated(unauthenticated_p) {
+	// v0.2 Stage 7 — snapshot authn/authz settings at server start.
+	// Locked-in for the lifetime of this AuthManager (= the running
+	// HarborHttpServer). Mid-process SET GLOBAL on these settings does
+	// NOT affect the running server; restart to apply.
+	if (auto db_locked = db.lock()) {
+		auto resolve = [&](const char *primary, const char *quack_alias, const char *default_name) -> string {
+			auto v = GetSettingString(*db_locked, primary);
+			if (v.empty()) {
+				v = GetSettingString(*db_locked, quack_alias);
+			}
+			if (v.empty()) {
+				v = default_name;
+			}
+			return v;
+		};
+		snapshot_authn_fn_name =
+		    resolve("harbor_authentication_function", "quack_authentication_function", "harbor_check_token");
+		snapshot_authz_fn_name =
+		    resolve("harbor_authorization_function", "quack_authorization_function", "harbor_nop_authorization");
+		snapshot_has_custom_authn_fn = snapshot_authn_fn_name != "harbor_check_token" &&
+		                                snapshot_authn_fn_name != "quack_check_token";
+		// Same semantic IsAdminAuthzCustomConfigured uses, but applied
+		// to the resolved snapshot. Aliases under a custom name are
+		// treated as the operator's policy; built-in nops (any case/
+		// schema-prefix variant) count as default.
+		snapshot_has_custom_authz_fn = !IsBuiltinNopAuthz(snapshot_authz_fn_name);
+	}
 }
 
 AuthManager::~AuthManager() {
@@ -233,13 +268,11 @@ bool AuthManager::RunAuthentication(const string &session_id, const string &clie
 	if (!db_locked) {
 		return false;
 	}
-	auto fn_name = GetSettingString(*db_locked, "harbor_authentication_function");
-	if (fn_name.empty()) {
-		fn_name = GetSettingString(*db_locked, "quack_authentication_function");
-	}
-	if (fn_name.empty()) {
-		fn_name = "harbor_check_token";
-	}
+	// v0.2 Stage 7: use the snapshot resolved at server start, NOT a
+	// live setting read. Closes TOCTOU window where an authenticated
+	// caller could SET GLOBAL harbor_authentication_function mid-process
+	// to broaden auth.
+	const auto &fn_name = snapshot_authn_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(client_token), Value(server_token)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);
@@ -288,8 +321,10 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	// Round-20 polish: only pay the two-setting-read cost when the
 	// query is actually __HARBOR_ADMIN__-prefixed. Non-admin /sql and
 	// /quack queries hit the fast resolve-fn path below directly.
-	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") &&
-	    !AuthManager::IsAdminAuthzCustomConfigured(*db_locked)) {
+	// v0.2 Stage 7: snapshot-based "is custom authz configured?" check.
+	// Was IsAdminAuthzCustomConfigured(*db_locked) — live setting read,
+	// vulnerable to mid-process SET GLOBAL TOCTOU.
+	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") && !snapshot_has_custom_authz_fn) {
 		bool allow_admin_without_authz = false;
 		Value allow_setting;
 		auto &config = DBConfig::GetConfig(*db_locked);
@@ -304,14 +339,10 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 		// returns true. This is the explicit operator opt-in path.
 	}
 
-	// Resolve the authz function name in Harbor-primary / Quack-compat order.
-	auto fn_name = GetSettingString(*db_locked, "harbor_authorization_function");
-	if (fn_name.empty()) {
-		fn_name = GetSettingString(*db_locked, "quack_authorization_function");
-	}
-	if (fn_name.empty()) {
-		fn_name = "harbor_nop_authorization";
-	}
+	// v0.2 Stage 7: use the snapshot resolved at server start (NOT a
+	// live setting read) so authz is immutable for the running server's
+	// lifetime. Same TOCTOU rationale as RunAuthentication.
+	const auto &fn_name = snapshot_authz_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(query)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);

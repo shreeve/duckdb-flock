@@ -169,10 +169,12 @@ void HarborHttpServer::RegisterBuiltinHandlers(ClientContext &context) {
 		};
 		// PR-6 follow-up (round 19): use the single-source-of-truth
 		// "is admin authz custom configured?" rule from AuthManager.
-		// The previous inline check counted any non-empty setting as
-		// "custom"; that fails open when an operator explicitly sets
-		// the setting to a built-in NOP function name (round-19 catch).
-		bool custom_authz_configured = AuthManager::IsAdminAuthzCustomConfigured(*db_locked);
+		// v0.2 Stage 7: now reads from AuthManager's snapshot rather
+		// than a live setting query, so the start-time WARN log
+		// reflects the locked-in policy (mid-process SET GLOBAL on
+		// the authz function setting cannot affect this WARN's accuracy
+		// because it cannot affect the running server's authz at all).
+		bool custom_authz_configured = auth->HasCustomAuthzConfigured();
 		bool allow_admin_without_authz = setting_bool_or("harbor_allow_admin_without_authz", false);
 		if (allow_admin_without_authz && !custom_authz_configured) {
 			auto &logger = Logger::Get(*db_locked);
