@@ -4,7 +4,57 @@ All notable changes to the `harbor` DuckDB extension are documented
 here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — v0.2.0 (auth modes refactor)
+
+### Changed (BREAKING)
+
+- **Three-mode auth model.** `harbor_serve(uri, token := <value>)`
+  now encodes the auth posture entirely in the token argument's value
+  (no separate `mode` enum, no `harbor_local_dev_mode` setting):
+  - **omitted** (or `harbor_serve('uri')`) — auto-generate a random
+    static token, default authn. Same as v0.1.
+  - **`token := 'x'`** — operator-supplied static token, default
+    authn. Same as v0.1.
+  - **`token := NULL`** — unauthenticated mode. Refuses to start
+    unless the bind is loopback. ALL HTTP routes (`/sql`, `/quack`,
+    `/ddb/*`, `/localEvents`, UI) accept any caller and assign the
+    synthetic principal `harbor.local-dev`. Replaces v0.1's
+    `harbor_local_dev_mode` SQL setting AND broadens the bypass scope
+    from UI-only to all protocols (the v0.1 asymmetry was a footgun).
+  - **`token := ''`** — hard error. The empty string is almost always
+    an env-var-plumbing accident; rejected with a migration-teaching
+    error message.
+  - **Custom `harbor_authentication_function` + any `token` argument**
+    — hard error. The token is dead config when a callback decides
+    validity; the contradiction surfaces at `harbor_serve` time.
+
+- **`harbor_local_dev_mode` SQL setting REMOVED.** Any `SET GLOBAL
+  harbor_local_dev_mode = ...` raises a hard error with a migration
+  message pointing at `token := NULL`. The setting's description is
+  updated to "REMOVED in v0.2." (Reading via `current_setting()` still
+  returns the historical default `false` because DuckDB doesn't expose
+  a getter-callback hook, but it has no effect on behavior.)
+
+- **Synthetic principal renamed `__local_dev__` → `harbor.local-dev`.**
+  Human-readable in audit logs; no colon-delimiter collision with the
+  `__HARBOR_ADMIN__:resource:action` admin-authz format. Constant
+  centralized as `AuthManager::LocalDevPrincipalId()`.
+
+- **Auth posture snapshotted at `harbor_serve` startup.** The resolved
+  values of `harbor_authentication_function` and
+  `harbor_authorization_function` (with `quack_*` fallbacks and the
+  `harbor_check_token` / `harbor_nop_authorization` defaults) are
+  captured once at server-start and used for the running server's
+  lifetime. `SET GLOBAL` on these settings while a server is running
+  has NO effect until the next `harbor_serve`. Closes a TOCTOU window
+  where an authenticated SQL caller could mid-process redirect
+  authentication to a different function.
+
+### Fixed
+
+- Pre-existing crash on `harbor_serve(uri, token := NULL)` in v0.1.x
+  (called `GetValue<string>()` on a NULL `Value` → segfault). The
+  v0.2 four-token-form bind logic `IsNull()`-checks first.
 
 ### Documentation
 
