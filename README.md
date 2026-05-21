@@ -10,7 +10,7 @@ All on the same port, against the same in-process DuckDB, with the same
 session pool and auth model.
 
 > **Status:** v0.1 design baseline. Tracks upstream `duckdb-quack`
-> (`v1.5-variegata`) and `duckdb-ui`. Targets DuckDB v1.5.2; will
+> (`v1.5-variegata`) and `duckdb-ui`. Targets DuckDB v1.5.3; will
 > rebase to DuckDB v2.0 GA when it lands. The full design is in
 > [`SPEC.md`](./SPEC.md).
 >
@@ -46,24 +46,31 @@ session pool and auth model.
 > printed by `harbor_serve()`, the page POSTs to `/auth/login`, sets a
 > `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
 > request proxies through to `ui.duckdb.org`. For local dev only,
-> `SET GLOBAL harbor_local_dev_mode = true` (with bind on loopback)
-> skips the token-paste step and uses a synthetic
-> `sha256("__HARBOR_LOCAL_DEV__")` principal so the connection-pool
-> isolation invariant still holds.
+> pass `token := NULL` to `harbor_serve()` (v0.2; replaces the v0.1
+> `harbor_local_dev_mode` setting) — the server refuses to start
+> unless bound to loopback, the token-paste step is skipped, and
+> all routes (`/sql`, `/quack`, `/ddb/*`, UI) accept the synthetic
+> `harbor.local-dev` principal.
 
 ## Quick Start
 
+`harbor` is published in the [DuckDB community-extensions
+registry](https://duckdb.org/community_extensions/), so for nearly
+every user the install is one line:
+
 ```sql
--- Today, from a local build:
-LOAD '/path/to/build/release/extension/harbor/harbor.duckdb_extension';
+INSTALL harbor FROM community;
+LOAD harbor;
 
--- After community publication (planned):
--- INSTALL harbor FROM community;
--- LOAD harbor;
-
--- Start the server (returns the URI, URL, and a generated token)
-CALL harbor_serve('harbor:127.0.0.1:9494');
+-- Start the server with one of three auth modes (v0.2):
+CALL harbor_serve('harbor:127.0.0.1:9494');                    -- Mode 3: random token, default authn
+CALL harbor_serve('harbor:0.0.0.0:9494', token := 'my-secret'); -- Mode 2: operator-supplied token
+CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);     -- Mode 1: open dev (loopback only)
 ```
+
+> Building from source instead? Replace the `INSTALL` line with
+> `LOAD '/path/to/build/release/extension/harbor/harbor.duckdb_extension';`
+> and start DuckDB with `duckdb -unsigned`.
 
 ```
 ┌─────────────────────────────┬───────────────────────┬─────────────────────────────────┐
@@ -444,7 +451,7 @@ for the full list):
 
 ## Requirements
 
-- **DuckDB** v1.5.2 (each harbor release pins to a specific DuckDB version)
+- **DuckDB** v1.5.3 (each harbor release pins to a specific DuckDB version)
 - **Reverse proxy** (nginx, Caddy, Traefik) recommended for TLS termination
   if exposing beyond localhost
 

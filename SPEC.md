@@ -25,7 +25,7 @@ one session pool, and one auth/authz model.
 
 - **Single binary, single port, single DuckDB instance.** A loaded `harbor`
   extension turns one DuckDB process into a multi-protocol HTTP service.
-- **Upstream Quack compatibility.** Stock DuckDB clients (≥ v1.5.2 with the
+- **Upstream Quack compatibility.** Stock DuckDB clients (≥ v1.5.3 with the
   upstream `quack` extension installed) `ATTACH 'quack:host'` and Just Work
   against a harbor server. We track upstream `duckdb-quack` and rebase as it
   evolves toward DuckDB v2.0 GA.
@@ -567,7 +567,7 @@ interchange across DuckDB versions, use `/quack` (BinarySerializer); a
 future `Accept: application/vnd.apache.arrow.stream` mode on `/sql` is
 on the roadmap.
 
-The complete `LogicalTypeId` matrix for DuckDB v1.5.2 is enumerated in
+The complete `LogicalTypeId` matrix for DuckDB v1.5.3 is enumerated in
 `test/types/` — every entry has a round-trip test.
 
 ### 5.5 Convenience routes
@@ -716,6 +716,41 @@ and `Connection::Interrupt()` is invoked if a query is in flight (this
 is a harbor addition; upstream just clears the result).
 
 ## 7. Authentication and authorization
+
+### Three auth modes (v0.2)
+
+The auth posture is determined entirely by the `token` argument to
+`harbor_serve`. No separate `mode` enum, no `harbor_local_dev_mode`
+SQL setting (the v0.1 setting was removed; SET on it now hard-errors
+with a migration message).
+
+| Form | Mode | Behavior |
+|---|---|---|
+| `harbor_serve('uri')` | **3 (random)** | Auto-generate a 16-byte hex static token. Default authn (`harbor_check_token` compares request token against this generated value). Returned in the result row. |
+| `harbor_serve('uri', token := 'x')` | **2 (static)** | Operator-supplied static token. Default authn. |
+| `harbor_serve('uri', token := NULL)` | **1 (open dev)** | Unauthenticated. Refuses to start unless the bind is loopback. ALL HTTP routes (`/sql`, `/quack`, `/ddb/*`, `/localEvents`, UI) accept any caller and assign the synthetic principal `harbor.local-dev`. |
+| `harbor_serve('uri', token := '')` | — | **Hard error.** Empty string is almost always an env-var-plumbing accident; rejected loudly with a migration-teaching message. |
+| Custom `harbor_authentication_function` set + any `token` argument | — | **Hard error.** The custom callback decides validity; a static token would be dead config that misleads operators. Either omit `token` (callback decides) or unset the custom callback (use static-token auth). |
+
+#### Authn function snapshot (v0.2 invariant)
+
+The resolved values of `harbor_authentication_function` and
+`harbor_authorization_function` (with `quack_*` fallbacks +
+`harbor_check_token` / `harbor_nop_authorization` defaults) are
+captured ONCE at `harbor_serve` startup and used for the running
+server's lifetime. `SET GLOBAL` on these settings while a server is
+running has NO effect until the next `harbor_serve`. This closes the
+TOCTOU window where an authenticated SQL caller could change the
+authn function mid-process and broaden auth for everyone else.
+
+#### Authorization is orthogonal
+
+All three modes pair freely with `harbor_authorization_function`
+(default `harbor_nop_authorization` returns true for everything
+except `__HARBOR_ADMIN__:resource:action` synthetic queries, which
+are default-deny unless `harbor_allow_admin_without_authz=true`).
+Production-grade multi-tenant deployment = Mode 3 (custom authn) +
+custom authz; see [`examples/auth/`](examples/auth/) for recipes.
 
 ### Threat model
 
@@ -1191,7 +1226,7 @@ DuckDB's own `duckdb_logs_parsed('Harbor')` for structured stats.
 
 | Versioned thing | harbor's commitment |
 |---|---|
-| **DuckDB engine** | Each harbor release pins to a specific DuckDB version (initially v1.5.2). Cross-version load is refused with a clear error. |
+| **DuckDB engine** | Each harbor release pins to a specific DuckDB version (v0.2.0 pins v1.5.3; v0.1.x pinned v1.5.2). Cross-version load is refused with a clear error. |
 | **Quack wire protocol** | Tracks upstream `duckdb/duckdb-quack`. Each rebase point is recorded in `BUILD.md` with the upstream commit. We do not promise wire compatibility across rebase points until DuckDB v2.0 GA. |
 | **DuckDB UI protocol** | Tracks upstream `duckdb/duckdb-ui`. Same caveat as Quack. |
 | **harbor `/sql` JSON format** | Semantic versioning. Added fields and added type encodings are minor; removed fields, changed shapes, or changed type semantics are major. |
@@ -1202,7 +1237,7 @@ DuckDB's own `duckdb_logs_parsed('Harbor')` for structured stats.
 
 ```
 X-Harbor-Version:          0.1.0
-X-DuckDB-Version:         v1.5.2
+X-DuckDB-Version:         v1.5.3
 X-DuckDB-Platform:        osx_arm64
 X-Quack-Protocol-Version: 1
 X-Ui-Extension-Version:   <upstream UI version pinned>
@@ -1223,7 +1258,7 @@ duckdb-harbor/
 ├── extension_config.cmake
 ├── vcpkg.json
 ├── Makefile
-├── duckdb/                           ← submodule, pinned to v1.5.2
+├── duckdb/                           ← submodule, pinned to v1.5.3
 ├── extension-ci-tools/               ← submodule
 ├── src/
 │   ├── harbor_extension.cpp           ← entry point, settings, function registration

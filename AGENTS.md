@@ -639,7 +639,7 @@ expect every path where it is.
 Two upstream-source directories sit side-by-side at the top, doing
 different jobs (this trips up first-time readers):
 
-- **`duckdb/`** — git submodule pinned to v1.5.2. **Build-required:**
+- **`duckdb/`** — git submodule pinned to v1.5.3. **Build-required:**
   `CMakeLists.txt` references `duckdb/third_party/httplib` and
   `duckdb/extension/autocomplete/include`. The build literally won't
   work without it. Never edit.
@@ -657,7 +657,7 @@ Top-level files + tracked dirs:
 | `CHANGELOG.md` | Released-version log | Yes (append on release) |
 | `LICENSE` | MIT, dual copyright (DuckDB Foundation + harbor authors) | Never silently |
 | `CMakeLists.txt`, `Makefile`, `vcpkg.json`, `extension_config.cmake`, `.editorconfig` | Build configuration | Carefully |
-| `duckdb/` | Submodule, pinned at v1.5.2 (build-required) | Never |
+| `duckdb/` | Submodule, pinned at v1.5.3 (build-required) | Never |
 | `extension-ci-tools/` | Submodule (provides Makefiles + Actions matrix) | Never |
 | `docs/upstream-quack-patches.md`, `docs/upstream-ui-patches.md` | Tracks every edit harbor made to vendored upstream code so future rebases are diffable | Yes (append when rebasing) |
 

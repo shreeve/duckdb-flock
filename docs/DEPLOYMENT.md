@@ -31,7 +31,7 @@ Pick the right binary for your machine from the
 > `build/release/extension/harbor/harbor.duckdb_extension` — same thing,
 > just locally built.
 
-Make sure DuckDB v1.5.2 is installed (any newer 1.5.x works for the
+Make sure DuckDB v1.5.3 is installed (any newer 1.5.x works for the
 `duckdb-quack v1.5-variegata` line; v2.x will need a rebuild
 post-rebase).
 
@@ -357,9 +357,14 @@ your client correctly) and 504 `QUERY_TIMEOUT` (you're hitting the
 - **Cookie signing key is ephemeral per process** by design (SPEC §7).
   Restarting harbor logs out every browser session. Bearer tokens +
   the auth function table-row data survive — only cookies don't.
-- **`/localToken` and `harbor_local_dev_mode` only work on
-  loopback bind**. If you bind on `0.0.0.0`, both are forced off as a
-  safety measure.
+- **`/localToken` only works on loopback bind**. If you bind on
+  `0.0.0.0`, it's forced off as a safety measure.
+- **Mode 1 (`token := NULL`) requires loopback bind**. `harbor_serve`
+  refuses to start with `token := NULL` on a non-loopback bind. (In
+  v0.1.x this was the `harbor_local_dev_mode` SQL setting; v0.2
+  removed it in favor of the more explicit token-argument-as-mode
+  encoding. `SET GLOBAL harbor_local_dev_mode = ...` now hard-errors
+  with a migration message.)
 - **`harbor_serve` is single-server-per-process.** A second call before
   `harbor_stop` throws. Don't try to host two harbors from one duckdb
   CLI invocation.

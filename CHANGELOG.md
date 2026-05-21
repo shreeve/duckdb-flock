@@ -4,7 +4,12 @@ All notable changes to the `harbor` DuckDB extension are documented
 here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.2.0 (auth modes refactor)
+## [Unreleased] — v0.2.0 (auth modes refactor + DuckDB v1.5.3)
+
+### DuckDB version
+
+- **Pinned to DuckDB v1.5.3** (released 2026-05-20, bugfix release on
+  the v1.5-variegata line). v0.1.x pinned v1.5.2.
 
 ### Changed (BREAKING)
 
