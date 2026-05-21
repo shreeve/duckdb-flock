@@ -332,3 +332,30 @@ statement error con1
 CALL harbor_serve('quack:localhost:19495', token := '')
 ----
 token := '' is not allowed
+
+# v0.2 Stage 4: custom harbor_authentication_function + ANY token argument
+# is a hard error. The custom callback decides validity; a static token
+# would be dead config that misleads operators (they'd copy the returned
+# token into a Bearer header and wonder why auth fails).
+statement ok
+SET GLOBAL harbor_authentication_function = 'quack_check_token'
+
+# quack_check_token is the upstream alias for the default. Custom-authn
+# detection treats it as default (not custom). Sanity-check by setting
+# a non-default name and trying to pass a token.
+statement ok
+SET GLOBAL harbor_authentication_function = 'my_custom_auth_fn'
+
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := 'should-be-rejected')
+----
+custom harbor_authentication_function
+
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := NULL)
+----
+custom harbor_authentication_function
+
+# Reset for any later tests in the file.
+statement ok
+RESET GLOBAL harbor_authentication_function

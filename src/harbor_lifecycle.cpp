@@ -65,6 +65,52 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
+	// v0.2 Stage 4: custom-authn + token-arg incompatibility check.
+	//
+	// If the operator has set `harbor_authentication_function` to a
+	// custom callback, the static `token` argument is dead config: the
+	// callback decides validity, not the static comparison. Silently
+	// honoring `token := 'x'` in that case would mislead operators who
+	// expect to see the returned auto-token in a Bearer header. Hard-
+	// error so the contradiction surfaces at config time.
+	//
+	// We inspect the SQL setting once at bind time. AuthManager will
+	// use the same setting at request time (snapshot via the running
+	// process — DuckDB settings can be SET GLOBAL after harbor_serve
+	// returns, but Stage 3's snapshot semantics will lock that down).
+	bool has_custom_authn_fn = false;
+	{
+		auto db_locked = context.db ? context.db : nullptr;
+		if (db_locked) {
+			Value v;
+			auto &cfg = DBConfig::GetConfig(*db_locked);
+			auto pick = [&](const char *key) -> string {
+				if (cfg.TryGetCurrentSetting(key, v) && !v.IsNull() &&
+				    v.type().id() == LogicalTypeId::VARCHAR) {
+					return v.GetValue<string>();
+				}
+				return string();
+			};
+			string fn = pick("harbor_authentication_function");
+			if (fn.empty()) {
+				fn = pick("quack_authentication_function");
+			}
+			has_custom_authn_fn = !fn.empty() && fn != "harbor_check_token" && fn != "quack_check_token";
+		}
+	}
+	if (has_custom_authn_fn && input.named_parameters.find("token") != input.named_parameters.end()) {
+		throw InvalidInputException(
+		    "harbor_serve: token argument is not allowed when a custom "
+		    "harbor_authentication_function is configured. The custom "
+		    "callback decides credential validity; the static token would "
+		    "be dead config.\n"
+		    "  - Either omit the `token` argument:\n"
+		    "        CALL harbor_serve('uri');\n"
+		    "  - Or unset the custom authn function to use static-token auth:\n"
+		    "        RESET GLOBAL harbor_authentication_function;\n"
+		    "        CALL harbor_serve('uri', token := 'your-secret');");
+	}
+
 	// v0.2 token semantics on harbor_serve(uri, token := <value>):
 	//
 	//   omitted          → auto-generate a random token (default authn,
@@ -86,10 +132,19 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	// the operator's choosing.
 	auto token_iter = input.named_parameters.find("token");
 	if (token_iter == input.named_parameters.end()) {
-		// Omitted → auto-generate (default authn).
-		bind_data->token = AuthManager::GenerateRandomToken(*context.db);
-		bind_data->unauthenticated = false;
-		AuthManager::ValidateToken(bind_data->token);
+		if (has_custom_authn_fn) {
+			// Custom authn + token omitted → DON'T auto-generate. The
+			// callback decides validity; an auto-generated token would
+			// just be returned to the operator and ignored by the
+			// callback. Result row's auth_token column will be NULL.
+			bind_data->token = "";
+			bind_data->unauthenticated = false;
+		} else {
+			// Default authn + token omitted → auto-generate.
+			bind_data->token = AuthManager::GenerateRandomToken(*context.db);
+			bind_data->unauthenticated = false;
+			AuthManager::ValidateToken(bind_data->token);
+		}
 	} else if (token_iter->second.IsNull()) {
 		// token := NULL → unauthenticated mode. Loopback bind required.
 		if (!bind_data->listen_uri.IsLocal()) {
@@ -134,10 +189,11 @@ void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
-	// In unauthenticated mode the auth_token column is NULL — there's no
-	// token for the operator to copy/paste anywhere, and a placeholder
-	// like '' or '(none)' would be semantically misleading.
-	if (bind_data.unauthenticated) {
+	// auth_token column is NULL when there's no token for the operator
+	// to copy: unauthenticated mode (no auth at all) or custom-authn
+	// mode (the custom callback decides; the server token is dead
+	// config). A placeholder like '' or '(none)' would be misleading.
+	if (bind_data.token.empty()) {
 		output.SetValue(2, 0, Value(LogicalType::VARCHAR));
 	} else {
 		output.SetValue(2, 0, bind_data.token);
