@@ -334,13 +334,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
-	// `harbor_local_dev_mode` is intentionally rejected on SET. It was
-	// the v0.1 trigger for the UI-only auth bypass; harbor's
-	// unauthenticated mode now lives on `harbor_serve(uri, token :=
-	// NULL)` and applies uniformly to `/sql`, `/quack`, `/ddb/*`, and
+	// `harbor_local_dev_mode` is intentionally rejected on SET. It is
+	// retained as a registered name so stale operator configs surface
+	// loudly via the setter callback rather than silently no-op'ing.
+	// Unauthenticated mode lives on `harbor_serve(uri, token := NULL)`
+	// and applies uniformly to `/sql`, `/quack`, `/ddb/*`, and
 	// `/localEvents`. Both `SET GLOBAL ... = true` and `... = false`
-	// hard-error so a stale config is surfaced loudly rather than
-	// silently doing nothing.
+	// hard-error.
 	config.AddExtensionOption(
 	    "harbor_local_dev_mode",
 	    "Removed. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
