@@ -80,7 +80,7 @@ HarborHttpServer::HarborHttpServer(weak_ptr<DatabaseInstance> db_p, QuackUri uri
     : db(std::move(db_p)), uri(std::move(uri_p)), token(std::move(token_p)), unauthenticated(unauthenticated_p),
       started_at(std::chrono::steady_clock::now()) {
 	sessions = make_uniq<SessionManager>(db);
-	auth = make_uniq<AuthManager>(db, token);
+	auth = make_uniq<AuthManager>(db, token, unauthenticated);
 }
 
 HarborHttpServer::~HarborHttpServer() {

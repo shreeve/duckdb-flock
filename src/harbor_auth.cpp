@@ -24,11 +24,19 @@
 
 namespace duckdb {
 
-AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p)
-    : db(std::move(db_p)), server_token(std::move(server_token_p)) {
+AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p, bool unauthenticated_p)
+    : db(std::move(db_p)), server_token(std::move(server_token_p)), unauthenticated(unauthenticated_p) {
 }
 
 AuthManager::~AuthManager() {
+}
+
+const string &AuthManager::LocalDevPrincipalId() {
+	// Literal string (not a hash). Human-readable in audit logs;
+	// stable across processes; no colon delimiter collision with
+	// the __HARBOR_ADMIN__:resource:action format used elsewhere.
+	static const string id = "harbor.local-dev";
+	return id;
 }
 
 void AuthManager::ValidateToken(const string &token) {
@@ -213,6 +221,14 @@ string AuthManager::GenerateRandomToken(DatabaseInstance &db) {
 }
 
 bool AuthManager::RunAuthentication(const string &session_id, const string &client_token) {
+	// v0.2 unauthenticated mode: skip the credential comparison entirely.
+	// Quack still parses the CONNECTION_REQUEST frame correctly (caller-side);
+	// only this comparison is skipped. Stock Quack clients sending a
+	// non-empty AuthString continue to connect (the comparison just
+	// short-circuits to true).
+	if (unauthenticated) {
+		return true;
+	}
 	auto db_locked = db.lock();
 	if (!db_locked) {
 		return false;
@@ -415,6 +431,19 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 
 AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
                                             const string &synthetic_session_id) {
+	// v0.2 unauthenticated mode (harbor_serve(uri, token := NULL) on
+	// loopback): short-circuit before looking at any credentials. ALL
+	// presented credentials (Bearer / Cookie / X-Harbor-Token) are
+	// ignored — stale cookies must never produce a different principal
+	// than fresh requests, or audit-trail meaning is lost.
+	if (unauthenticated) {
+		AuthResult ar;
+		ar.ok = true;
+		ar.principal_id = LocalDevPrincipalId();
+		ar.source = AuthSource::kLocalDev;
+		return ar;
+	}
+
 	auto try_explicit_token = [&](const string &header_name, AuthSource source,
 	                              const string &raw_value) -> AuthResult {
 		AuthResult ar;

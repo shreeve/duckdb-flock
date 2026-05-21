@@ -81,8 +81,22 @@ struct CorsDecision {
 
 class AuthManager {
 public:
-	AuthManager(weak_ptr<DatabaseInstance> db, string server_token);
+	// `unauthenticated` (v0.2): when true, the auth gate is open —
+	// AuthenticateRequest returns success immediately with the
+	// synthetic `harbor.local-dev` principal, and RunAuthentication
+	// returns true unconditionally. All presented credentials
+	// (Bearer / Cookie / X-Harbor-Token / Quack AuthString) are
+	// ignored. Triggered exclusively by `harbor_serve(uri, token := NULL)`
+	// on a loopback bind. Snapshotted at server-start; immutable for the
+	// lifetime of the running server.
+	AuthManager(weak_ptr<DatabaseInstance> db, string server_token, bool unauthenticated);
 	~AuthManager();
+
+	// Public, stable principal id assigned to every request when harbor
+	// is running in unauthenticated mode. Human-readable in audit logs;
+	// has no colon (avoids collision with `__HARBOR_ADMIN__:resource:action`
+	// authz format).
+	static const string &LocalDevPrincipalId();
 
 	AuthManager(const AuthManager &) = delete;
 	AuthManager &operator=(const AuthManager &) = delete;
@@ -211,6 +225,7 @@ private:
 
 	weak_ptr<DatabaseInstance> db;
 	string server_token;
+	bool unauthenticated;
 
 	std::mutex signing_key_mutex;
 	std::vector<uint8_t> signing_key; // 32 random bytes; init on first IssueCookie/VerifyCookie call
