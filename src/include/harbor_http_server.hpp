@@ -81,7 +81,11 @@ public:
 		CLOSED,      // Close() done; safe to destroy
 	};
 
-	HarborHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
+	// `unauthenticated` (v0.2): if true, all auth-bearing routes accept
+	// requests without a credential and assign the synthetic
+	// `harbor.local-dev` principal. Triggered exclusively by
+	// `harbor_serve(uri, token := NULL)` on a loopback bind. See SPEC §7.
+	HarborHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token, bool unauthenticated);
 	~HarborHttpServer();
 
 	HarborHttpServer(const HarborHttpServer &) = delete;
@@ -147,6 +151,13 @@ public:
 	const string &Token() const {
 		return token;
 	}
+	// True iff `harbor_serve` was invoked with `token := NULL` on a
+	// loopback bind, opening the server to unauthenticated local
+	// connections. Snapshotted at server-start time; never changes
+	// while the server is running.
+	bool IsUnauthenticated() const {
+		return unauthenticated;
+	}
 	std::chrono::steady_clock::time_point StartedAt() const {
 		return started_at;
 	}
@@ -185,6 +196,7 @@ private:
 	weak_ptr<DatabaseInstance> db;
 	QuackUri uri;
 	string token;
+	bool unauthenticated;
 	std::chrono::steady_clock::time_point started_at;
 
 	std::mutex state_mu;
@@ -239,7 +251,8 @@ public:
 	//
 	// PR-3+: takes a ClientContext for handler-construction settings
 	// lookup (UiHandlers reads ui_remote_url etc.).
-	void Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token);
+	void Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token,
+	           bool unauthenticated);
 
 	// Stop the running server. Returns false if none was running on
 	// the given URI. Records stopped_generation == current generation

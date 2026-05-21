@@ -75,8 +75,9 @@ HarborHttpServer::ActiveRequestGuard::~ActiveRequestGuard() {
 
 // -- HarborHttpServer ------------------------------------------------------
 
-HarborHttpServer::HarborHttpServer(weak_ptr<DatabaseInstance> db_p, QuackUri uri_p, string token_p)
-    : db(std::move(db_p)), uri(std::move(uri_p)), token(std::move(token_p)),
+HarborHttpServer::HarborHttpServer(weak_ptr<DatabaseInstance> db_p, QuackUri uri_p, string token_p,
+                                   bool unauthenticated_p)
+    : db(std::move(db_p)), uri(std::move(uri_p)), token(std::move(token_p)), unauthenticated(unauthenticated_p),
       started_at(std::chrono::steady_clock::now()) {
 	sessions = make_uniq<SessionManager>(db);
 	auth = make_uniq<AuthManager>(db, token);
@@ -373,7 +374,8 @@ HarborServerState &HarborServerState::Global() {
 	return instance;
 }
 
-void HarborServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token) {
+void HarborServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance> db, QuackUri uri, string token,
+                              bool unauthenticated) {
 	std::lock_guard<std::mutex> lock(state_mu);
 	if (server) {
 		throw InvalidInputException("harbor server is already running on %s — harbor is single-server-per-process; "
@@ -382,7 +384,7 @@ void HarborServerState::Start(ClientContext &context, weak_ptr<DatabaseInstance>
 	}
 
 	// Sequence: ctor → Bind() → RegisterBuiltinHandlers(context) → StartListening()
-	auto srv = make_uniq<HarborHttpServer>(std::move(db), std::move(uri), std::move(token));
+	auto srv = make_uniq<HarborHttpServer>(std::move(db), std::move(uri), std::move(token), unauthenticated);
 	srv->Bind();
 	srv->RegisterBuiltinHandlers(context);
 	srv->StartListening();

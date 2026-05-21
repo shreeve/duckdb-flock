@@ -35,10 +35,10 @@
 //       Authorization: Bearer / X-Harbor-Token. AuthManager runs
 //       harbor_authentication_function for explicit-bearer paths;
 //       cookie verify is HMAC-only.
-//     - Local-dev bypass: harbor_local_dev_mode=true + loopback bind
-//       + Origin in allowed_origins → use the synthetic principal
-//       sha256("__HARBOR_LOCAL_DEV__") so connection-pool keying still
-//       behaves like every other authenticated path.
+//     - Local-dev bypass (v0.2): harbor_serve(..., token := NULL) on a
+//       loopback bind → use the synthetic principal "harbor.local-dev"
+//       so connection-pool keying still behaves like every other
+//       authenticated path.
 //
 //   /localToken: Referer must start with our local URL AND the bind
 //     host must be loopback (per SPEC §7). No cookie required —
@@ -166,9 +166,9 @@ private:
 	// /localToken returns 404 unless this is true.
 	bool IsBoundLocally() const;
 
-	// True iff the harbor_local_dev_mode setting is true. Read on each
-	// call rather than memoized so operators can flip it at runtime
-	// (e.g. via `SET GLOBAL harbor_local_dev_mode = true`).
+	// True iff harbor was started with harbor_serve(..., token := NULL),
+	// i.e. unauthenticated mode. Snapshotted at server-start time
+	// (v0.2: settings are immutable for a running server's lifetime).
 	bool LocalDevMode() const;
 
 	// Authenticate a UI request. Returns the AuthResult from
@@ -176,8 +176,8 @@ private:
 	// override:
 	//   if AuthenticateRequest fails, AND LocalDevMode() is true,
 	//   AND IsBoundLocally(), AND require_origin_allowed implies
-	//   IsAllowedOrigin(req.Origin), THEN return ok=true with
-	//   principal_id = sha256("__HARBOR_LOCAL_DEV__") and
+	//   IsAllowedOrigin(req.Origin) (or empty Origin), THEN return
+	//   ok=true with principal_id = "harbor.local-dev" and
 	//   source = AuthSource::kLocalDev. The synthetic principal
 	//   keeps the connection-pool keying invariant alive even with
 	//   local-dev bypass active (round-11 review).

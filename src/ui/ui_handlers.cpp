@@ -157,31 +157,24 @@ bool UiHandlers::IsBoundLocally() const {
 }
 
 bool UiHandlers::LocalDevMode() const {
-	auto db = ddb_instance.lock();
-	if (!db) {
-		return false;
-	}
-	Value setting_val;
-	auto &config = DBConfig::GetConfig(*db);
-	if (!config.TryGetCurrentSetting("harbor_local_dev_mode", setting_val) || setting_val.IsNull()) {
-		return false;
-	}
-	try {
-		return setting_val.GetValue<bool>();
-	} catch (...) {
-		return false;
-	}
+	// v0.2: snapshotted at server start (via harbor_serve(..., token := NULL)),
+	// not read from a SQL setting. This avoids mid-process mutation
+	// races and makes the auth posture immutable for the lifetime of
+	// a running server.
+	return server.IsUnauthenticated();
 }
 
 namespace {
 
-// Synthetic principal id used when harbor_local_dev_mode bypasses
-// real authentication. Derived as sha256("__HARBOR_LOCAL_DEV__") so
-// it has the same shape (64 lowercase hex chars) as a real
-// principal_id and the connection-pool keying logic doesn't need
-// to special-case it.
+// Synthetic principal id assigned to every request when harbor is
+// running in unauthenticated mode (`harbor_serve(uri, token := NULL)`).
+// v0.2: literal string "harbor.local-dev" rather than the v0.1
+// sha256("__HARBOR_LOCAL_DEV__") hash. Human-readable in audit logs,
+// boring (no colon — colons are a delimiter elsewhere in harbor's
+// admin authz format), and the connection-pool keying logic just
+// uses string equality so the shape difference doesn't matter.
 const std::string &LocalDevPrincipalId() {
-	static const std::string id = duckdb::harbor_crypto::Sha256Hex("__HARBOR_LOCAL_DEV__");
+	static const std::string id = "harbor.local-dev";
 	return id;
 }
 

@@ -18,6 +18,10 @@ struct HarborLifecycleBindData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	// v0.2: true iff the operator passed `token := NULL`, putting harbor
+	// into unauthenticated mode. Empty token in this case; HarborHttpServer
+	// uses this flag (not the empty token) to decide auth-bypass behavior.
+	bool unauthenticated = false;
 };
 
 struct HarborWaitBindData : public TableFunctionData {
@@ -61,14 +65,60 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
-	if (input.named_parameters.find("token") != input.named_parameters.end()) {
-		bind_data->token = input.named_parameters["token"].GetValue<string>();
-	} else {
+	// v0.2 token semantics on harbor_serve(uri, token := <value>):
+	//
+	//   omitted          → auto-generate a random token (default authn,
+	//                      same behavior as v0.1).
+	//   token := 'x'     → use 'x' as the static token (default authn,
+	//                      same behavior as v0.1).
+	//   token := NULL    → unauthenticated mode. All auth-bearing routes
+	//                      accept any caller and assign the synthetic
+	//                      'harbor.local-dev' principal. Refuses to start
+	//                      unless the bind is loopback. Replaces the
+	//                      v0.1 `harbor_local_dev_mode` SQL setting.
+	//   token := ''      → hard error. Empty string is almost always an
+	//                      env-var-plumbing accident; reject loudly.
+	//
+	// Note: DuckDB's named-parameter binder implicitly casts numeric and
+	// boolean values to strings (e.g. `token := 12345` → `token := '12345'`)
+	// before this code sees them. That's a DuckDB-layer quirk, not a
+	// harbor security gap — the resulting string is still a token of
+	// the operator's choosing.
+	auto token_iter = input.named_parameters.find("token");
+	if (token_iter == input.named_parameters.end()) {
+		// Omitted → auto-generate (default authn).
 		bind_data->token = AuthManager::GenerateRandomToken(*context.db);
+		bind_data->unauthenticated = false;
+		AuthManager::ValidateToken(bind_data->token);
+	} else if (token_iter->second.IsNull()) {
+		// token := NULL → unauthenticated mode. Loopback bind required.
+		if (!bind_data->listen_uri.IsLocal()) {
+			throw InvalidInputException(
+			    "harbor_serve: token := NULL (unauthenticated mode) requires a loopback bind, but '%s' is not "
+			    "loopback. Either bind to localhost / 127.0.0.1 / [::1], or pass an explicit token.",
+			    bind_data->listen_uri.Uri());
+		}
+		bind_data->token = "";
+		bind_data->unauthenticated = true;
+	} else {
+		auto token_str = token_iter->second.GetValue<string>();
+		if (token_str.empty()) {
+			throw InvalidInputException(
+			    "harbor_serve: token := '' is not allowed.\n"
+			    "  - To require a static token, pass a non-empty string:\n"
+			    "        token := 'your-secret'\n"
+			    "  - To auto-generate a token, omit the argument:\n"
+			    "        harbor_serve('uri')\n"
+			    "  - To disable authentication (loopback only), pass NULL:\n"
+			    "        token := NULL\n"
+			    "Empty string is rejected because it is a common result of unset "
+			    "environment variables or missing configuration, and would "
+			    "otherwise silently disable authentication.");
+		}
+		bind_data->token = std::move(token_str);
+		bind_data->unauthenticated = false;
+		AuthManager::ValidateToken(bind_data->token);
 	}
-	// Validate at bind-time: a length error here fails before the listener
-	// thread is spawned, so the SQL caller sees the error clearly.
-	AuthManager::ValidateToken(bind_data->token);
 
 	return std::move(bind_data);
 }
@@ -79,11 +129,19 @@ void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &
 		return;
 	}
 
-	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
+	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token,
+	                                  bind_data.unauthenticated);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
-	output.SetValue(2, 0, bind_data.token);
+	// In unauthenticated mode the auth_token column is NULL — there's no
+	// token for the operator to copy/paste anywhere, and a placeholder
+	// like '' or '(none)' would be semantically misleading.
+	if (bind_data.unauthenticated) {
+		output.SetValue(2, 0, Value(LogicalType::VARCHAR));
+	} else {
+		output.SetValue(2, 0, bind_data.token);
+	}
 	output.SetCardinality(1);
 	bind_data.finished = true;
 }

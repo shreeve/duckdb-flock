@@ -151,10 +151,19 @@ SELECT current_setting('harbor_cors_origins')
 ----
 (empty)
 
-query I
-SELECT current_setting('harbor_local_dev_mode')
+# v0.2: harbor_local_dev_mode is REMOVED. Reading the setting still
+# returns the historical default (DuckDB doesn't let us forbid reads
+# on a registered setting), but any attempt to SET it must hard-error
+# with a migration message pointing at `harbor_serve(..., token := NULL)`.
+statement error
+SET GLOBAL harbor_local_dev_mode = true
 ----
-false
+removed in harbor v0.2
+
+statement error
+SET GLOBAL harbor_local_dev_mode = false
+----
+removed in harbor v0.2
 
 # harbor_cookie_signing_key is intentionally NOT a setting (security
 # review — would let any SQL caller mint cookies). Confirm it's
@@ -287,3 +296,39 @@ query I
 SELECT current_setting('harbor_query_timeout_s')
 ----
 0
+
+# ------------------------------------------------------------------
+# v0.2: harbor_serve token semantics
+# ------------------------------------------------------------------
+# Four meaningful forms of the `token` argument:
+#   - omitted          → auto-generate (default authn)
+#   - token := 'x'     → static token (default authn)
+#   - token := NULL    → unauthenticated mode, loopback bind required
+#   - token := ''      → hard error (helpful migration message)
+# Plus the loopback enforcement on the NULL case.
+
+# token := NULL on a loopback bind: succeeds, auth_token column is NULL.
+query III con1
+CALL harbor_serve('quack:127.0.0.1:19495', token := NULL)
+----
+quack:127.0.0.1:19495	http://127.0.0.1:19495	NULL
+
+statement ok con1
+CALL harbor_stop()
+
+# token := NULL on a non-loopback bind: refuses to start. We bypass
+# the unrelated `allow_other_hostname` localhost-only default to
+# isolate the v0.2 NULL-loopback check (otherwise we'd just see the
+# pre-existing "Only localhost is allowed..." error).
+statement error con1
+CALL harbor_serve('quack:0.0.0.0:19495', token := NULL, allow_other_hostname := true)
+----
+requires a loopback bind
+
+# token := '' (empty string): hard error with the migration-teaching
+# message. This is the load-bearing error of the v0.2 design — it's
+# the one place where an env-var-plumbing accident lands.
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := '')
+----
+token := '' is not allowed

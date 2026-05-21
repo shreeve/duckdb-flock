@@ -303,10 +303,26 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("harbor_local_dev_mode",
-	                          "When true AND bind is loopback: skip token requirement for same-Origin /ddb/* and UI catch-all requests "
-	                          "(uses synthetic principal sha256(\"__HARBOR_LOCAL_DEV__\") for connection-pool keying); off by default",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	// v0.2: harbor_local_dev_mode was removed. Setting it now raises a
+	// hard error pointing at the replacement. We deliberately reject any
+	// attempt — including `SET GLOBAL harbor_local_dev_mode = false` —
+	// so stale configs surface loudly instead of silently doing nothing.
+	// The replacement (`harbor_serve(uri, token := NULL)`) covers the
+	// same use case AND opens auth bypass to /sql + /quack uniformly,
+	// not just the UI surface (which was the v0.1 asymmetry footgun).
+	config.AddExtensionOption(
+	    "harbor_local_dev_mode",
+	    "REMOVED in v0.2. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false),
+	    [](ClientContext &, SetScope, Value &) {
+		    throw InvalidInputException(
+		        "harbor_local_dev_mode was removed in harbor v0.2. To run an unauthenticated harbor on a loopback "
+		        "bind, pass NULL for the token instead:\n"
+		        "    CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);\n"
+		        "Unlike the v0.1 setting (which only relaxed auth on the UI surface), token := NULL applies "
+		        "uniformly to /sql, /quack, /ddb/*, and /localEvents.");
+	    },
+	    SetScope::GLOBAL);
 
 	// PR-5: /sql endpoint limits per SPEC §6.
 	config.AddExtensionOption("harbor_max_sessions",
