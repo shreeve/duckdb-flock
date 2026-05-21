@@ -6,6 +6,31 @@ versioning follows [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **DuckDB UI "Connection to DuckDB Lost" in `harbor_local_dev_mode = true`.**
+  EventSource same-origin requests on `/localEvents` were being rejected
+  with 401 by the local-dev bypass inside `AuthorizeUiRequest`. Per the
+  Fetch spec, browsers do NOT send `Origin` on same-origin no-cors
+  requests like `new EventSource('/localEvents')`. v0.1.1 patched the
+  pre-auth Origin gate on `/localEvents` to accept empty Origin as
+  same-origin, but the local-dev bypass inside `AuthorizeUiRequest`
+  still required Origin to be in the allow-list — so EventSource
+  silently 401'd, the UI's catalog-events SSE long-poll closed, and
+  the "Connection to DuckDB Lost" modal popped on every page load
+  for `harbor_local_dev_mode = true` users. Fix mirrors the v0.1.1
+  pattern: empty Origin is treated as implicitly-same-origin in the
+  bypass check too. Routes whose pre-auth gate already rejects
+  empty-Origin requests (`/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`)
+  are unaffected — this scope is intentional, only relaxing the
+  bypass for the one route that intentionally allows empty Origin
+  pre-auth (`/localEvents`).
+
+  New regression test: `scripts/golden-localdev-sse.sh` (5 assertions
+  covering empty-Origin success, disallowed-Origin still-rejected,
+  allowed-Origin control case, `/ddb/run` no-Origin still-rejected,
+  `/ddb/run` allowed-Origin bypass active).
+
 ### Documentation
 
 - **`docs/WHY_HARBOR.md`** — new positioning doc answering the natural
