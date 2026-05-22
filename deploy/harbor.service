@@ -63,7 +63,7 @@ SystemCallFilter=@system-service
 
 # A loopback bind is the default; if you bind harbor on an external
 # interface, put a real reverse proxy (nginx, caddy, traefik) in front
-# for TLS. See docs/DEPLOYMENT.md.
+# for TLS. See README.md "Production hardening".
 
 [Install]
 WantedBy=multi-user.target

@@ -60,9 +60,8 @@ one session pool, and one auth/authz model.
 > For the higher-level "why does this exist when stock Quack + an
 > httpserver extension + duckdb-ui already exist" framing — input
 > deltas, what harbor adds beyond the sum, and what harbor is
-> explicitly *not* — see
-> [`docs/WHY_HARBOR.md`](docs/WHY_HARBOR.md). This section is the
-> architectural truth; that doc is the positioning summary.
+> explicitly *not* — see [`README.md`](README.md). This section is
+> the architectural truth; the README is the user-facing summary.
 
 ### Process layout
 
@@ -806,9 +805,9 @@ to gate both:
    with one of the [`bearer-*.sql`](examples/auth/) recipes for
    per-principal token bookkeeping.
 
-For the operator-facing rollout checklist, see
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §3 "Harden". For
-copy-paste recipes, see [`examples/auth/`](examples/auth/).
+For the operator-facing rollout checklist see the "Production
+hardening" section of [`README.md`](README.md). For copy-paste
+recipes, see [`examples/auth/`](examples/auth/).
 
 ### Defaults
 

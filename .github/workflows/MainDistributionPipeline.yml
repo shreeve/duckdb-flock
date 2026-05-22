@@ -54,7 +54,6 @@ on:
       - 'scripts/**'        # golden-*.sh, validate-deployment.sh, load-test.sh — CI doesn't run them
       - 'examples/**'       # auth recipes (operator-loaded SQL)
       - 'deploy/**'         # Dockerfile, systemd unit, bootstrap SQL
-      - 'CHANGELOG.md'
       - '.editorconfig'
       - '.gitignore'
       - '.gitattributes'
@@ -67,7 +66,6 @@ on:
       - 'scripts/**'
       - 'examples/**'
       - 'deploy/**'
-      - 'CHANGELOG.md'
       - '.editorconfig'
       - '.gitignore'
       - '.gitattributes'
