@@ -354,7 +354,12 @@ CALL harbor_stop()
 statement error con1
 CALL harbor_serve('quack:127.0.0.1:19495')
 ----
-No function matches
+harbor_serve(uri, ...) is no longer supported
+
+statement error con1
+CALL harbor_serve(bind := '127.0.0.1:19495')
+----
+bind must be a hostname or IP address only
 
 # token := '' (empty string): hard error with the migration-teaching
 # message. This is the load-bearing error of the design — it's the

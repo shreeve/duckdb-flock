@@ -8,7 +8,8 @@
 //     union members, enum values) so a client can decode rows
 //     losslessly.
 //   - Emit per-row values per the SPEC §5.4 type table:
-//       * BIGINT/HUGEINT/UBIGINT/UHUGEINT as JSON STRINGS (JS-safe)
+//       * BIGINT/HUGEINT/UBIGINT/UHUGEINT as JSON numbers inside the
+//         JavaScript safe-integer range, JSON strings outside it
 //       * DECIMAL as STRING preserving width/scale
 //       * UUID as canonical lowercase
 //       * DATE/TIME/TIMESTAMP/TIMESTAMPTZ as ISO 8601 forms

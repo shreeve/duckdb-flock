@@ -40,6 +40,11 @@ string HarborUriFromBindPort(const string &bind, uint16_t port) {
 	if (host.empty()) {
 		throw InvalidInputException("harbor_serve: bind must not be empty");
 	}
+	auto first_colon = host.find(':');
+	if (first_colon != string::npos && host.find(':', first_colon + 1) == string::npos &&
+	    !(StringUtil::StartsWith(host, "[") && StringUtil::EndsWith(host, "]"))) {
+		throw InvalidInputException("harbor_serve: bind must be a hostname or IP address only; pass the port with port := ...");
+	}
 	if (StringUtil::Contains(host, ":") && !(StringUtil::StartsWith(host, "[") && StringUtil::EndsWith(host, "]"))) {
 		host = "[" + host + "]";
 	}
@@ -179,6 +184,16 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	return std::move(bind_data);
 }
 
+unique_ptr<FunctionData> HarborServeLegacyUriBind(ClientContext &, TableFunctionBindInput &,
+                                                  vector<LogicalType> &, vector<string> &) {
+	throw InvalidInputException(
+	    "harbor_serve(uri, ...) is no longer supported. Use named bind/port arguments instead:\n"
+	    "    CALL harbor_serve(bind := '127.0.0.1', port := 9494);\n"
+	    "    CALL harbor_serve(bind := '0.0.0.0', port := 9494, token := 'your-secret');\n"
+	    "    CALL harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL);\n"
+	    "The Quack-compatible URI form remains available as quack_serve('quack:host:port', ...).");
+}
+
 void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->CastNoConst<HarborLifecycleBindData>();
 	if (bind_data.finished) {
@@ -213,6 +228,12 @@ TableFunctionSet HarborServeFunction::GetFunction() {
 	fun.named_parameters["port"] = LogicalType::USMALLINT;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
 	set.AddFunction(fun);
+
+	auto legacy_fun = TableFunction("harbor_serve", {LogicalType::VARCHAR}, HarborServe, HarborServeLegacyUriBind);
+	legacy_fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN;
+	legacy_fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
+	legacy_fun.named_parameters["token"] = LogicalType::VARCHAR;
+	set.AddFunction(legacy_fun);
 	return set;
 }
 
