@@ -66,6 +66,56 @@ std::string UhugeintToString(uhugeint_t v) {
 	return Uhugeint::ToString(v);
 }
 
+constexpr int64_t kJsonSafeIntegerMin = -9007199254740991LL; // -(2^53 - 1)
+constexpr int64_t kJsonSafeIntegerMax = 9007199254740991LL;  //  2^53 - 1
+constexpr uint64_t kJsonSafeUnsignedIntegerMax = 9007199254740991ULL;
+
+bool IsJsonSafeInteger(int64_t v) {
+	return v >= kJsonSafeIntegerMin && v <= kJsonSafeIntegerMax;
+}
+
+bool IsJsonSafeInteger(uint64_t v) {
+	return v <= kJsonSafeUnsignedIntegerMax;
+}
+
+void EmitJsonSafeInt64OrString(JsonWriter &out, int64_t v) {
+	if (IsJsonSafeInteger(v)) {
+		out.Int64(v);
+		return;
+	}
+	char tmp[32];
+	auto n = std::snprintf(tmp, sizeof(tmp), "%" PRId64, v);
+	out.String(tmp, n > 0 ? static_cast<std::size_t>(n) : 0);
+}
+
+void EmitJsonSafeUint64OrString(JsonWriter &out, uint64_t v) {
+	if (IsJsonSafeInteger(v)) {
+		out.Uint64(v);
+		return;
+	}
+	char tmp[32];
+	auto n = std::snprintf(tmp, sizeof(tmp), "%" PRIu64, v);
+	out.String(tmp, n > 0 ? static_cast<std::size_t>(n) : 0);
+}
+
+void EmitJsonSafeHugeintOrString(JsonWriter &out, hugeint_t v) {
+	int64_t as_i64;
+	if (Hugeint::TryCast(v, as_i64) && IsJsonSafeInteger(as_i64)) {
+		out.Int64(as_i64);
+		return;
+	}
+	out.String(HugeintToString(v));
+}
+
+void EmitJsonSafeUhugeintOrString(JsonWriter &out, uhugeint_t v) {
+	uint64_t as_u64;
+	if (Uhugeint::TryCast(v, as_u64) && IsJsonSafeInteger(as_u64)) {
+		out.Uint64(as_u64);
+		return;
+	}
+	out.String(UhugeintToString(v));
+}
+
 // Base64 encode arbitrary bytes; matches DuckDB's Blob::ToBase64 output.
 std::string Base64Encode(const string_t &blob) {
 	auto required = Blob::ToBase64Size(blob);
@@ -388,24 +438,20 @@ void SqlChunkEncoder::EmitValue(JsonWriter &out, const Value &v, const LogicalTy
 	case LogicalTypeId::UINTEGER:
 		out.Uint64(v.GetValue<uint32_t>());
 		return;
-	// SPEC §5.4: 64+-bit integers as STRING for JS-safe round-trip.
-	case LogicalTypeId::BIGINT: {
-		char tmp[32];
-		auto n = std::snprintf(tmp, sizeof(tmp), "%" PRId64, v.GetValue<int64_t>());
-		out.String(tmp, n > 0 ? static_cast<std::size_t>(n) : 0);
+	// 64+-bit integers: JSON number inside the exact IEEE-754 safe
+	// integer range, JSON string outside it. This keeps COUNT(*) and
+	// ordinary ids ergonomic while preserving precision for large ids.
+	case LogicalTypeId::BIGINT:
+		EmitJsonSafeInt64OrString(out, v.GetValue<int64_t>());
 		return;
-	}
-	case LogicalTypeId::UBIGINT: {
-		char tmp[32];
-		auto n = std::snprintf(tmp, sizeof(tmp), "%" PRIu64, v.GetValue<uint64_t>());
-		out.String(tmp, n > 0 ? static_cast<std::size_t>(n) : 0);
+	case LogicalTypeId::UBIGINT:
+		EmitJsonSafeUint64OrString(out, v.GetValue<uint64_t>());
 		return;
-	}
 	case LogicalTypeId::HUGEINT:
-		out.String(HugeintToString(v.GetValueUnsafe<hugeint_t>()));
+		EmitJsonSafeHugeintOrString(out, v.GetValueUnsafe<hugeint_t>());
 		return;
 	case LogicalTypeId::UHUGEINT:
-		out.String(UhugeintToString(v.GetValueUnsafe<uhugeint_t>()));
+		EmitJsonSafeUhugeintOrString(out, v.GetValueUnsafe<uhugeint_t>());
 		return;
 	case LogicalTypeId::FLOAT:
 		out.Double(v.GetValue<float>());

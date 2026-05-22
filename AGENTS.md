@@ -271,8 +271,9 @@ defer session ownership / authz / `409 SESSION_BUSY` semantics.
       "value":"123.4567"}`), including typed NULL.
 - [x] `SqlChunkEncoder` emits schema metadata + lossless row encodings
       for representative core types tested in golden coverage:
-      BIGINT-as-string, DECIMAL-as-string, INTERVAL object, BLOB base64,
-      JSON text string, plus the scalar families.
+      smart BIGINT/UBIGINT/HUGEINT/UHUGEINT number-vs-string encoding,
+      DECIMAL-as-string, INTERVAL object, BLOB base64, JSON text string,
+      plus the scalar families.
 - [x] Principal-owned SQL sessions: `HarborSession.owner_principal_id`,
       `CreateOwnedSession`, `LookupOwnedSession`, `DestroyOwnedSession`,
       and `DestroyAllOwnedBy`. Wrong-principal / unknown session ids
@@ -878,8 +879,8 @@ in mind:
 | `/quack` uses `application/vnd.duckdb` Content-Type | Stock Quack clients reject other types |
 | `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt` responses match upstream `duckdb-ui` byte-for-byte | The official UI is the only consumer |
 | `/ddb/*` responses use `application/octet-stream` Content-Type | Match upstream UI |
-| `/sql` NDJSON schema line is the authority for type decoding | Types like `BIGINT` arrive as strings; clients must consult schema |
-| `BIGINT`, `HUGEINT`, `UBIGINT`, `UHUGEINT` are encoded as JSON strings in `/sql` | JS precision; SPEC §5.4 |
+| `/sql` NDJSON schema line is the authority for type decoding | Values may choose the most ergonomic exact JSON shape (e.g. BIGINT number vs string); clients must consult schema for the underlying DuckDB type |
+| `BIGINT`, `HUGEINT`, `UBIGINT`, `UHUGEINT` are encoded as JSON numbers only inside `[-(2^53-1), 2^53-1]`, strings outside that range | Ergonomic common counts/ids without losing precision for large identifiers; SPEC §5.4 |
 | `MAP<K,V>` is encoded as array-of-pairs, not object | Keys can be non-string; ordering matters |
 | `JSON` column values are encoded as JSON-text strings, not nested JSON | Disambiguates SQL NULL from JSON null |
 | `INTERVAL` is encoded as `{months, days, micros}` object with micros as string | Matches DuckDB's `interval_t` exactly |

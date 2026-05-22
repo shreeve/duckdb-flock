@@ -11,7 +11,7 @@
 #   - Params: implicit `$1`, typed wrapper DECIMAL, typed NULL
 #   - Sessions: create, transaction state across requests, delete, foreign/not-found 404
 #   - /auth/logout?destroy_sessions=true destroys owned SQL sessions
-#   - Representative type encodings: BIGINT string, DECIMAL string, INTERVAL object, BLOB base64, JSON text string
+#   - Representative type encodings: BIGINT smart number/string, DECIMAL string, INTERVAL object, BLOB base64, JSON text string
 #
 # Usage:
 #   make release
@@ -116,7 +116,7 @@ curl -sfN -X POST "http://127.0.0.1:${PORT}/sql" \
     -d '{"sql":"FROM range(3) SELECT range AS i"}' \
     > /tmp/harbor-sql-chunk.ndjson
 grep -q '"type":"chunk"' /tmp/harbor-sql-chunk.ndjson || fail "chunk mode missing chunk line"
-grep -q '"rows":\[\["0"\],\["1"\],\["2"\]\]' /tmp/harbor-sql-chunk.ndjson || fail "chunk mode rows mismatch"
+grep -q '"rows":\[\[0\],\[1\],\[2\]\]' /tmp/harbor-sql-chunk.ndjson || fail "chunk mode rows mismatch"
 pass "POST /sql NDJSON chunk mode"
 
 # ---- One-shot JSON ----
@@ -216,7 +216,7 @@ curl -sfN -X POST "http://127.0.0.1:${PORT}/sql" \
     -H 'Content-Type: application/json' \
     -d '{"sql":"SELECT 9223372036854775807::BIGINT AS big, 12345.6789::DECIMAL(18,4) AS dec_val, INTERVAL 1 YEAR + INTERVAL 2 DAYS + INTERVAL 3 SECONDS AS iv, '\''hello world'\''::BLOB AS b, '\''{\"a\":1}'\''::JSON AS j"}' \
     > /tmp/harbor-sql-types.ndjson
-grep -q '"9223372036854775807"' /tmp/harbor-sql-types.ndjson || fail "BIGINT should be string"
+grep -q '"9223372036854775807"' /tmp/harbor-sql-types.ndjson || fail "BIGINT max should be string"
 grep -q '"12345.6789"' /tmp/harbor-sql-types.ndjson || fail "DECIMAL should be string"
 grep -q '"months":12,"days":2,"micros":"3000000"' /tmp/harbor-sql-types.ndjson || fail "INTERVAL object mismatch"
 grep -q '"aGVsbG8gd29ybGQ="' /tmp/harbor-sql-types.ndjson || fail "BLOB base64 mismatch"
@@ -237,7 +237,7 @@ curl -sf -X POST "http://127.0.0.1:${PORT}/sql" -H "Authorization: Bearer ${TOKE
 curl -sfN -X POST "http://127.0.0.1:${PORT}/sql" -H "Authorization: Bearer ${TOKEN}" \
     -H 'Content-Type: application/json' -d "{\"sql\":\"SELECT count(*) AS n FROM t\",\"sessionId\":\"${SID}\"}" \
     > /tmp/harbor-sql-session.ndjson
-grep -q '"values":\["3"\]' /tmp/harbor-sql-session.ndjson || fail "session transaction state not visible"
+grep -q '"values":\[3\]' /tmp/harbor-sql-session.ndjson || fail "session transaction state not visible"
 pass "session transaction state survives requests"
 
 # ---- DML ... RETURNING must use select-shaped response ----

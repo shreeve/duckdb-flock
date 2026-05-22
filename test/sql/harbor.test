@@ -297,6 +297,22 @@ SELECT current_setting('harbor_query_timeout_s')
 ----
 0
 
+query I
+SELECT current_setting('harbor_stop_drain_timeout_s')
+----
+30
+
+statement ok
+SET GLOBAL harbor_stop_drain_timeout_s = 0
+
+query I
+SELECT current_setting('harbor_stop_drain_timeout_s')
+----
+0
+
+statement ok
+RESET GLOBAL harbor_stop_drain_timeout_s
+
 # ------------------------------------------------------------------
 # harbor_serve token semantics
 # ------------------------------------------------------------------

@@ -534,7 +534,7 @@ metadata so the row decoder can recurse.
 | `NULL` | `null` | |
 | `BOOLEAN` | `true` / `false` | |
 | `TINYINT`, `SMALLINT`, `INTEGER`, `UTINYINT`, `USMALLINT`, `UINTEGER` | JSON number | safe in IEEE-754 |
-| `BIGINT`, `UBIGINT`, `HUGEINT`, `UHUGEINT` | **string** | JS-safe; e.g. `"9223372036854775807"` |
+| `BIGINT`, `UBIGINT`, `HUGEINT`, `UHUGEINT` | JSON number inside `[-9007199254740991, 9007199254740991]`; string outside it | Common counts/ids stay ergonomic as numbers; out-of-range values preserve precision as strings. The schema record's `duckdbType` identifies the underlying integer type either way. |
 | `FLOAT`, `DOUBLE` | JSON number; `NaN`/±Infinity as strings `"NaN"`/`"Infinity"`/`"-Infinity"` | |
 | `DECIMAL(W,S)` | string | preserves width/scale; e.g. `"12345.6789"` |
 | `VARCHAR` | JSON string | |
@@ -556,6 +556,12 @@ metadata so the row decoder can recurse.
 | `ENUM` | string label | |
 | `UNION` | object: `{"tag":"member_name","value":...}` | tag is the active member |
 | `GEOMETRY` (spatial extension) | base64 WKB | `schema.encoding="wkb-base64"`, `schema.extension="spatial"` |
+
+Integer number-vs-string choice is **per value**, not per column. A
+single `BIGINT` or `HUGEINT` column may emit JSON numbers for safe
+values and JSON strings for larger values; clients should use the
+schema record's `duckdbType`, not the JSON token kind, to infer the
+underlying DuckDB type.
 
 **Round-trip promise:** harbor NDJSON is lossless for **every DuckDB
 core logical type listed above** when decoded using the schema record.
@@ -1145,7 +1151,6 @@ restored with `RESET GLOBAL`.
 |---|---|---|---|
 | `harbor_bind` | VARCHAR | `127.0.0.1` | Bind address. `0.0.0.0` to expose; triggers warnings + tightens defaults. |
 | `harbor_port` | INTEGER | `9494` | Listen port. |
-| `harbor_token` | VARCHAR | (auto) | Auth token; if unset, `harbor_serve` generates and returns one. |
 | `harbor_authentication_function` | VARCHAR | `harbor_check_token` | SQL function name for auth callback. |
 | `harbor_authorization_function` | VARCHAR | `harbor_nop_authorization` | SQL function name for authz callback. |
 | `harbor_auth_cookie_ttl_s` | UBIGINT | `43200` (12 h) | Cookie expiry. |
@@ -1154,23 +1159,27 @@ restored with `RESET GLOBAL`.
 | `harbor_query_timeout_s` | UBIGINT | `0` | Per-query timeout. `0` disables. |
 | `harbor_max_request_body_bytes` | UBIGINT | `268435456` (256 MiB) | Per-request body cap. |
 | `harbor_max_response_rows` | UBIGINT | `0` (unlimited) | `/sql` row truncation cap. |
-| `harbor_stop_drain_timeout_s` | UBIGINT | `30` | Max seconds `harbor_stop` waits for in-flight requests before interrupting them. |
+| `harbor_stop_drain_timeout_s` | UBIGINT | `30` | Seconds `harbor_stop` waits for in-flight request handlers to drain per attempt before re-checking active requests. `0` polls without waiting. |
 | `harbor_allow_admin_without_authz` | BOOLEAN | `false` | When the authz hook is the default permissive `harbor_nop_authorization`, admin endpoints still default-deny unless this is set. Loud warning at startup if `true`. |
 | `harbor_fetch_batch_chunks` | UBIGINT | `12` | Inherited from quack — chunks per FETCH. |
 | `harbor_fetch_batch_bytes` | UBIGINT | `4194304` (4 MiB) | Inherited from quack. |
 | `harbor_ui_assets` | VARCHAR | `proxy` | `proxy` / `bundled` / `disabled`. See §8. |
 | `harbor_ui_proxy_url` | VARCHAR | `https://ui.duckdb.org` | Upstream URL when `harbor_ui_assets = 'proxy'`. |
-| `harbor_local_dev_mode` | BOOLEAN | `false` | Skip token requirement for local-bound, same-Origin requests. |
 | `harbor_cors_origins` | VARCHAR | `''` (empty) | Comma-separated allow-list of origins for cross-origin `/sql`, `/quack`, `/auth/*`. |
 | `harbor_log_requests` | BOOLEAN | `true` | Per-request structured log entry. |
 | `harbor_log_queries` | BOOLEAN | `false` | Log full SQL of every executed query. Off by default (sensitive). |
 | `whoami_*` | VARCHAR | (empty) | Inherited from quack — node identity for `/whoami`. |
 
+Bearer tokens are configured through `harbor_serve`, not a standalone
+SQL setting: omit `token` to auto-generate, pass `token := '...'` for
+a static token, or pass `token := NULL` for unauthenticated loopback
+mode.
+
 Functions:
 
 | Function | Returns | Notes |
 |---|---|---|
-| `harbor_serve(uri, token := NULL, allow_other_hostname := false)` | row of `(uri, url, token)` | Starts the server. Validates token (≥ 4 chars), generates if NULL. **Single-server-per-process**: throws if a server is already running. |
+| `harbor_serve(uri, token := <omitted/string/NULL>, allow_other_hostname := false)` | row of `(uri, url, token)` | Starts the server. Omitted token auto-generates; non-empty string sets static-token mode; `NULL` enables unauthenticated loopback mode. **Single-server-per-process**: throws if a server is already running. |
 | `harbor_stop(uri)` | `BOOLEAN` | Stops the server bound to URI. Releases any thread blocked in `harbor_wait()`. |
 | `harbor_wait()` | `BOOLEAN` | Blocks the caller until the server stops or the process receives `SIGTERM`/`SIGINT`. Used in container init scripts to keep DuckDB alive. |
 | `harbor_status()` | row of `(running, uri, sessions, uptime_s)` | Introspect server state. |

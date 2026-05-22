@@ -81,8 +81,9 @@ curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null \
 #
 # Sends `SELECT <SQL_FRAGMENT> AS x` as one-shot JSON, then asserts the
 # top-level schema entry and the encoded value. EXPECTED_VALUE_JSON is
-# the LITERAL JSON text the value should encode to (e.g. `"42"` for
-# BIGINT-as-string, `42` for INTEGER, `null` for SQL NULL).
+# the LITERAL JSON text the value should encode to (e.g. `42` for a
+# safe BIGINT number, `"9007199254740992"` for an unsafe BIGINT string,
+# `null` for SQL NULL).
 assert_type() {
   local sql="$1"
   local expected_type="$2"
@@ -126,22 +127,28 @@ assert_type "FALSE"                   "BOOLEAN"  "true" "false" "BOOLEAN false"
 assert_type "NULL::BOOLEAN"           "BOOLEAN"  "true" "null"  "BOOLEAN NULL"
 
 # ============================================================================
-# Signed integer families (small numbers JSON-native, BIGINT/HUGEINT as string)
+# Signed integer families
 # ============================================================================
 assert_type "1::TINYINT"              "TINYINT"  "true" "1"     "TINYINT"
 assert_type "1::SMALLINT"             "SMALLINT" "true" "1"     "SMALLINT"
 assert_type "1::INTEGER"              "INTEGER"  "true" "1"     "INTEGER"
-# Note: BIGINT/HUGEINT/UBIGINT/UHUGEINT are still flagged lossless:true
-# in the schema — the schema "lossless" field is the encoder's claim
-# that the encoding is canonical/exact for that type, NOT a hint that
-# clients need to rebuild a string. They're always emitted as JSON
-# STRING for JS Number precision, lossless=true.
-assert_type "1::BIGINT"               "BIGINT"   "true" "\"1\"" "BIGINT (string for JS precision)"
-assert_type "1::HUGEINT"              "HUGEINT"  "true" "\"1\"" "HUGEINT (string for JS precision)"
+assert_type "1::BIGINT"               "BIGINT"   "true" "1"     "BIGINT small (number)"
+assert_type "1::HUGEINT"              "HUGEINT"  "true" "1"     "HUGEINT small (number)"
 # Boundary values.
 assert_type "127::TINYINT"            "TINYINT"  "true" "127"   "TINYINT max"
 assert_type "(-128)::TINYINT"         "TINYINT"  "true" "-128"  "TINYINT min"
-assert_type "9223372036854775807::BIGINT" "BIGINT" "true" "\"9223372036854775807\"" "BIGINT max"
+assert_type "9007199254740991::BIGINT"       "BIGINT"  "true" "9007199254740991"      "BIGINT max safe integer (number)"
+assert_type "9007199254740992::BIGINT"       "BIGINT"  "true" "\"9007199254740992\""  "BIGINT just above safe integer (string)"
+assert_type "(-9007199254740991)::BIGINT"    "BIGINT"  "true" "-9007199254740991"     "BIGINT min safe integer (number)"
+assert_type "(-9007199254740992)::BIGINT"    "BIGINT"  "true" "\"-9007199254740992\"" "BIGINT just below safe integer (string)"
+assert_type "9223372036854775807::BIGINT"    "BIGINT"  "true" "\"9223372036854775807\"" "BIGINT max (string)"
+assert_type "(-9223372036854775808)::BIGINT" "BIGINT"  "true" "\"-9223372036854775808\"" "BIGINT min (string)"
+assert_type "9007199254740991::HUGEINT"       "HUGEINT" "true" "9007199254740991"       "HUGEINT max safe integer (number)"
+assert_type "9007199254740992::HUGEINT"       "HUGEINT" "true" "\"9007199254740992\""   "HUGEINT just above safe integer (string)"
+assert_type "(-9007199254740991)::HUGEINT"    "HUGEINT" "true" "-9007199254740991"      "HUGEINT min safe integer (number)"
+assert_type "(-9007199254740992)::HUGEINT"    "HUGEINT" "true" "\"-9007199254740992\""  "HUGEINT just below safe integer (string)"
+assert_type "170141183460469231731687303715884105727::HUGEINT" "HUGEINT" "true" "\"170141183460469231731687303715884105727\"" "HUGEINT max (string)"
+assert_type "(-170141183460469231731687303715884105728)::HUGEINT" "HUGEINT" "true" "\"-170141183460469231731687303715884105728\"" "HUGEINT min (string)"
 
 # ============================================================================
 # Unsigned integer families (R-27 catch — every family covered)
@@ -149,10 +156,15 @@ assert_type "9223372036854775807::BIGINT" "BIGINT" "true" "\"9223372036854775807
 assert_type "1::UTINYINT"             "UTINYINT"  "true"  "1"     "UTINYINT"
 assert_type "1::USMALLINT"            "USMALLINT" "true"  "1"     "USMALLINT"
 assert_type "1::UINTEGER"             "UINTEGER"  "true"  "1"     "UINTEGER"
-assert_type "1::UBIGINT"              "UBIGINT"   "true" "\"1\"" "UBIGINT (string for JS precision)"
-assert_type "1::UHUGEINT"             "UHUGEINT"  "true" "\"1\"" "UHUGEINT (string for JS precision)"
+assert_type "1::UBIGINT"              "UBIGINT"   "true"  "1"     "UBIGINT small (number)"
+assert_type "1::UHUGEINT"             "UHUGEINT"  "true"  "1"     "UHUGEINT small (number)"
 assert_type "255::UTINYINT"           "UTINYINT"  "true"  "255"   "UTINYINT max"
-assert_type "18446744073709551615::UBIGINT" "UBIGINT" "true" "\"18446744073709551615\"" "UBIGINT max"
+assert_type "9007199254740991::UBIGINT"  "UBIGINT"  "true" "9007199254740991"      "UBIGINT max safe integer (number)"
+assert_type "9007199254740992::UBIGINT"  "UBIGINT"  "true" "\"9007199254740992\""  "UBIGINT just above safe integer (string)"
+assert_type "18446744073709551615::UBIGINT" "UBIGINT" "true" "\"18446744073709551615\"" "UBIGINT max (string)"
+assert_type "9007199254740991::UHUGEINT" "UHUGEINT" "true" "9007199254740991"      "UHUGEINT max safe integer (number)"
+assert_type "9007199254740992::UHUGEINT" "UHUGEINT" "true" "\"9007199254740992\""  "UHUGEINT just above safe integer (string)"
+assert_type "340282366920938463463374607431768211455::UHUGEINT" "UHUGEINT" "true" "\"340282366920938463463374607431768211455\"" "UHUGEINT max (string)"
 
 # ============================================================================
 # Floating point (incl. R-27 non-finite checks)

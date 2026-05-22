@@ -84,7 +84,7 @@ The hard part isn't starting an HTTP server. The hard part is making the browser
 - **One port, three surfaces.** UI in a browser, JSON SQL from any HTTP client, Quack RPC for stock DuckDB clients — all against the same in-process DuckDB.
 - **One auth/authz boundary.** Browser-friendly cookies and API-friendly bearer tokens use the same principal; one `harbor_authorization_function` runs for every SQL-bearing request, including admin endpoints.
 - **Sessions tied to the authenticated principal.** Browser and API requests can't accidentally share state across users; wrong-principal session lookups return `404 SESSION_NOT_FOUND` instead of leaking ids.
-- **Typed JSON + NDJSON streaming.** `BIGINT` / `HUGEINT` / `DECIMAL` as JSON strings (preserves precision in JS clients), `MAP<K,V>` as array-of-pairs (non-string keys, ordered), `INTERVAL` as `{months, days, micros}`. Round-trip tested per type. `/sql` streams `DataChunk`s with mid-stream error reporting.
+- **Typed JSON + NDJSON streaming.** `BIGINT` / `HUGEINT` values are JSON numbers when they fit JavaScript's safe-integer range and strings only when precision requires it; `DECIMAL` stays string-encoded to preserve scale. `MAP<K,V>` is array-of-pairs (non-string keys, ordered), `INTERVAL` is `{months, days, micros}`. Round-trip tested per type. `/sql` streams `DataChunk`s with mid-stream error reporting.
 - **Wire compatibility with stock clients.** A vanilla DuckDB with the upstream `quack` extension can `ATTACH 'quack:host'` against harbor without modification. The official DuckDB UI works against `GET /` and `POST /ddb/*` byte-for-byte.
 
 ---

@@ -334,6 +334,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("harbor_stop_drain_timeout_s",
+	                          "Seconds harbor_stop waits for in-flight request handlers to drain per attempt "
+	                          "before re-checking active requests (default 30; 0 = poll without waiting)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(30), nullptr, SetScope::GLOBAL);
 	// `harbor_local_dev_mode` is intentionally rejected on SET. It is
 	// retained as a registered name so stale operator configs surface
 	// loudly via the setter callback rather than silently no-op'ing.
@@ -369,7 +373,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Maximum POST body size for /sql JSON requests; larger requests return 413 PAYLOAD_TOO_LARGE "
 	    "(default 256 MiB; matches the nginx/Caddy reverse-proxy guidance for /quack APPEND payloads)",
 	    LogicalType::UBIGINT, Value::UBIGINT(268435456ULL), nullptr, SetScope::GLOBAL);
-
 	// PR-6: admin endpoints (/whoami, /tables, /schema/:db/:t, /checkpoint,
 	// /sessions, /interrupt, /sql/cancel) are gated by an internal
 	// default-deny rule on __HARBOR_ADMIN__:* synthetic authz strings
