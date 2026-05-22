@@ -321,8 +321,8 @@ RESET GLOBAL harbor_stop_drain_timeout_s
 #   - token := 'x'     → static token (default authn)
 #   - token := NULL    → unauthenticated mode
 #   - token := ''      → hard error (helpful migration message)
-# Prefer bind/port named arguments for new code; URI argument is retained
-# for compatibility.
+# harbor_serve is bind/port named-argument only. URI positional form is
+# kept on quack_serve for upstream Quack compatibility, not on harbor_serve.
 
 query III con1
 CALL harbor_serve(bind := '127.0.0.1', port := 19495, token := 'bind-port-test')
