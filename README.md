@@ -214,13 +214,23 @@ For the full settings list, route-by-route protocol details, error-code tables, 
 
 ---
 
-## Deployment artifacts
+## Running as a service
 
-Ready-to-use templates for common deployments live in [`deploy/`](./deploy/):
+Harbor is just a DuckDB process with the extension loaded. To run it
+under `systemd`, Docker, Incus, Kubernetes, or your own supervisor, use
+the same shape everywhere:
 
-- **`deploy/harbor.service`** — `systemd` unit for bare-metal Linux or Incus system containers. Runs harbor as a non-root user with state in `/var/lib/harbor/`.
-- **`deploy/Dockerfile`** + **`deploy/docker-compose.yml`** — minimal container image. Reads `HARBOR_TOKEN` from the environment, persists state in a named volume.
-- **`deploy/harbor-bootstrap.sql`** + **`deploy/harbor-bootstrap-docker.sql`** — heavily-commented bootstrap SQL (auth function, CORS, timeout, authz) loaded at server start.
+```sql
+LOAD harbor;
+SET GLOBAL harbor_query_timeout_s = 30;
+-- Configure authn/authz/CORS here.
+CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_wait();
+```
+
+`harbor_wait()` keeps the DuckDB process alive until SIGTERM/SIGINT or
+`harbor_stop()`. Put that SQL in whatever bootstrap file your process
+manager feeds to `duckdb`.
 
 After deploying, validate with:
 

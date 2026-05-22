@@ -654,7 +654,6 @@ Top-level files + tracked dirs:
 | `SPEC.md` | Authoritative design | Carefully — major changes need consensus |
 | `README.md` | User-facing introduction | Yes |
 | `AGENTS.md` | This file | Yes |
-| `deploy/` | systemd unit, Dockerfile, bootstrap SQL templates | Yes |
 | `LICENSE` | MIT, dual copyright (DuckDB Foundation + harbor authors) | Never silently |
 | `CMakeLists.txt`, `Makefile`, `vcpkg.json`, `extension_config.cmake`, `.editorconfig` | Build configuration | Carefully |
 | `duckdb/` | Submodule, pinned at v1.5.3 (build-required) | Never |
