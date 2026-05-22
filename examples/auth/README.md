@@ -2,8 +2,8 @@
 
 These recipes implement **Mode 3** of harbor's three-mode auth model
 (custom `harbor_authentication_function`). The other two modes are
-**Mode 1** (`harbor_serve(uri, token := NULL)` — open dev, loopback
-only) and **Mode 2** (`harbor_serve(uri, token := 'x')` —
+**Mode 1** (`harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL)` — unauthenticated) and
+**Mode 2** (`harbor_serve(bind := '127.0.0.1', port := 9494, token := 'x')` —
 operator-supplied or auto-generated static token).
 
 The default `harbor_authentication_function` accepts the static token
@@ -87,7 +87,7 @@ SELECT * FROM duckdb_functions() WHERE function_name LIKE 'my_%_auth%';
 
 -- Restart harbor for the GLOBAL settings to take effect on running:
 CALL harbor_stop();
-CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 ```
 
 After re-`harbor_serve`, the new auth functions take effect immediately.

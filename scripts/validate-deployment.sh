@@ -16,7 +16,7 @@
 # Notes:
 #   - The server MUST already be running. Start it via:
 #       LOAD '/path/to/harbor.<platform>.duckdb_extension';
-#       CALL harbor_serve('harbor:127.0.0.1:9494');
+#       CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 #       CALL harbor_wait();
 #   - The --origin flag controls the CORS-allow-list test. If your
 #     deployment has `harbor_cors_origins` set, pass one of the allowed

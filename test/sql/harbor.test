@@ -179,7 +179,7 @@ statement ok
 SET GLOBAL harbor_cors_origins='*'
 
 statement error
-CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-cors-test')
 ----
 harbor_cors_origins='*' is forbidden
 
@@ -189,9 +189,9 @@ statement ok
 SET GLOBAL harbor_cors_origins='https://app.example.com,http://localhost:3000'
 
 query III con1
-CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-cors-test')
 ----
-quack:localhost:19495	http://localhost:19495	harbor-cors-test
+harbor:localhost:19495	http://localhost:19495	harbor-cors-test
 
 statement ok con1
 CALL harbor_stop('quack:localhost:19495')
@@ -200,9 +200,9 @@ CALL harbor_stop('quack:localhost:19495')
 # per-process semantics make the no-arg form unambiguous: it stops
 # whatever's currently running. Both forms must coexist.
 query III con1
-CALL harbor_serve('quack:localhost:19495', token='harbor-stop-noarg-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-stop-noarg-test')
 ----
-quack:localhost:19495	http://localhost:19495	harbor-stop-noarg-test
+harbor:localhost:19495	http://localhost:19495	harbor-stop-noarg-test
 
 statement ok con1
 CALL harbor_stop()
@@ -220,7 +220,7 @@ statement ok
 SET GLOBAL harbor_cors_origins='https://app.example.com/admin'
 
 statement error
-CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-cors-test')
 ----
 must be scheme://host[:port]
 
@@ -229,7 +229,7 @@ statement ok
 SET GLOBAL harbor_cors_origins='app.example.com'
 
 statement error
-CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-cors-test')
 ----
 no scheme
 
@@ -238,7 +238,7 @@ statement ok
 SET GLOBAL harbor_cors_origins='ftp://app.example.com'
 
 statement error
-CALL harbor_serve('quack:localhost:19495', token='harbor-cors-test')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'harbor-cors-test')
 ----
 must use http or https scheme
 
@@ -319,33 +319,48 @@ RESET GLOBAL harbor_stop_drain_timeout_s
 # Four meaningful forms of the `token` argument:
 #   - omitted          → auto-generate (default authn)
 #   - token := 'x'     → static token (default authn)
-#   - token := NULL    → unauthenticated mode, loopback bind required
+#   - token := NULL    → unauthenticated mode
 #   - token := ''      → hard error (helpful migration message)
-# Plus the loopback enforcement on the NULL case.
+# Prefer bind/port named arguments for new code; URI argument is retained
+# for compatibility.
 
-# token := NULL on a loopback bind: succeeds, auth_token column is NULL.
 query III con1
-CALL harbor_serve('quack:127.0.0.1:19495', token := NULL)
+CALL harbor_serve(bind := '127.0.0.1', port := 19495, token := 'bind-port-test')
 ----
-quack:127.0.0.1:19495	http://127.0.0.1:19495	NULL
+harbor:127.0.0.1:19495	http://127.0.0.1:19495	bind-port-test
 
 statement ok con1
 CALL harbor_stop()
 
-# token := NULL on a non-loopback bind: refuses to start. We bypass
-# the unrelated `allow_other_hostname` localhost-only default to
-# isolate the NULL-loopback check (otherwise we'd just see the
-# pre-existing "Only localhost is allowed..." error).
-statement error con1
-CALL harbor_serve('quack:0.0.0.0:19495', token := NULL, allow_other_hostname := true)
+# token := NULL on a loopback bind: succeeds, auth_token column is NULL.
+query III con1
+CALL harbor_serve(bind := '127.0.0.1', port := 19495, token := NULL)
 ----
-requires a loopback bind
+harbor:127.0.0.1:19495	http://127.0.0.1:19495	NULL
+
+statement ok con1
+CALL harbor_stop()
+
+# token := NULL on a non-loopback bind is explicit unauthenticated mode.
+query III con1
+CALL harbor_serve(bind := '0.0.0.0', port := 19495, token := NULL)
+----
+harbor:0.0.0.0:19495	http://0.0.0.0:19495	NULL
+
+statement ok con1
+CALL harbor_stop()
+
+# Do not mix URI positional form with bind/port named arguments.
+statement error con1
+CALL harbor_serve('quack:127.0.0.1:19495')
+----
+No function matches
 
 # token := '' (empty string): hard error with the migration-teaching
 # message. This is the load-bearing error of the design — it's the
 # one place where an env-var-plumbing accident lands.
 statement error con1
-CALL harbor_serve('quack:localhost:19495', token := '')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := '')
 ----
 token := '' is not allowed
 
@@ -363,12 +378,12 @@ statement ok
 SET GLOBAL harbor_authentication_function = 'my_custom_auth_fn'
 
 statement error con1
-CALL harbor_serve('quack:localhost:19495', token := 'should-be-rejected')
+CALL harbor_serve(bind := 'localhost', port := 19495, token := 'should-be-rejected')
 ----
 custom harbor_authentication_function
 
 statement error con1
-CALL harbor_serve('quack:localhost:19495', token := NULL)
+CALL harbor_serve(bind := 'localhost', port := 19495, token := NULL)
 ----
 custom harbor_authentication_function
 

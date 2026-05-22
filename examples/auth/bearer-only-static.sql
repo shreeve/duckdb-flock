@@ -15,7 +15,7 @@
 --   -- (then update the token below or via UPDATE):
 --   SET GLOBAL harbor_authentication_function = 'harbor_static_authn';
 --   CALL harbor_stop();
---   CALL harbor_serve('harbor:127.0.0.1:9494');
+--   CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 --
 -- Rotating the token (no restart needed for the table; restart harbor
 -- only if you also want the in-flight cookies invalidated):

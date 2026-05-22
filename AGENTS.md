@@ -797,7 +797,7 @@ Interactive (REPL stays open, server runs in background):
 make release
 duckdb -unsigned   # opens the REPL
 LOAD '/abs/path/build/release/extension/harbor/harbor.duckdb_extension';
-CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 -- REPL is still yours; server is alive in a background thread
 ```
 
@@ -807,7 +807,7 @@ Non-interactive (script-driven smoke test):
 make release
 duckdb -unsigned -no-stdin -c "
   LOAD '$PWD/build/release/extension/harbor/harbor.duckdb_extension';
-  CALL harbor_serve('harbor:127.0.0.1:9494');
+  CALL harbor_serve(bind := '127.0.0.1', port := 9494);
   CALL harbor_wait();          -- blocks until SIGTERM/SIGINT
 " &
 DUCK_PID=$!

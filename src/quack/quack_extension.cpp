@@ -341,21 +341,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// `harbor_local_dev_mode` is intentionally rejected on SET. It is
 	// retained as a registered name so stale operator configs surface
 	// loudly via the setter callback rather than silently no-op'ing.
-	// Unauthenticated mode lives on `harbor_serve(uri, token := NULL)`
+	// Unauthenticated mode lives on `harbor_serve(..., token := NULL)`
 	// and applies uniformly to `/sql`, `/quack`, `/ddb/*`, and
 	// `/localEvents`. Both `SET GLOBAL ... = true` and `... = false`
 	// hard-error.
 	config.AddExtensionOption(
 	    "harbor_local_dev_mode",
-	    "Removed. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
+	    "Removed. Use harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL) for unauthenticated mode.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false),
 	    [](ClientContext &, SetScope, Value &) {
 		    throw InvalidInputException(
-		        "harbor_local_dev_mode is no longer supported. To run an unauthenticated harbor on a loopback "
-		        "bind, pass NULL for the token instead:\n"
-		        "    CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);\n"
-		        "Unlike the previous setting (which only relaxed auth on the UI surface), token := NULL "
-		        "applies uniformly to /sql, /quack, /ddb/*, and /localEvents.");
+		        "harbor_local_dev_mode is no longer supported. To run harbor without authentication, "
+		        "pass NULL for the token instead:\n"
+		        "    CALL harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL);\n"
+		        "token := NULL applies uniformly to /sql, /quack, /ddb/*, and /localEvents.");
 	    },
 	    SetScope::GLOBAL);
 

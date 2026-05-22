@@ -2,7 +2,7 @@
 
 // Lifecycle SQL functions per SPEC §9:
 //
-//   harbor_serve(uri, token := NULL, allow_other_hostname := false)
+//   harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL)
 //     → row of (listen_uri, listen_url, auth_token)
 //   harbor_stop()      → row of (status)   -- stops THE running server
 //                                            (single-server-per-process)

@@ -24,7 +24,7 @@ Harbor runs **inside** the DuckDB process — when DuckDB exits, the HTTP server
 ```sql
 INSTALL harbor FROM community;
 LOAD harbor;
-CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 ```
 
 ```text
@@ -95,23 +95,23 @@ Harbor has three operational postures, all selected at `harbor_serve` time. Ther
 
 | Call | Meaning | Use |
 |---|---|---|
-| `harbor_serve('harbor:host:port')` | Auto-generate a random token. Default authentication. | Local dev or quick demo. |
-| `harbor_serve('harbor:host:port', token := 'my-secret')` | Operator-supplied static token. Default authentication. | Single-operator service. |
-| `harbor_serve('harbor:127.0.0.1:9494', token := NULL)` | **Unauthenticated.** All routes accept any caller; synthetic principal is `harbor.local-dev`. **Refuses to start unless bound to loopback.** | Local development without the token-paste step. |
+| `harbor_serve(bind := '127.0.0.1', port := 9494)` | Auto-generate a random token. Default authentication. | Local dev or quick demo. |
+| `harbor_serve(bind := '0.0.0.0', port := 9494, token := 'my-secret')` | Operator-supplied static token. Default authentication. | Single-operator service. |
+| `harbor_serve(bind := '127.0.0.1', port := 9494, token := NULL)` | **Unauthenticated.** All routes accept any caller; synthetic principal is `harbor.local-dev`. | Local development without the token-paste step. |
 | Custom `harbor_authentication_function` + omitted `token` | Operator-defined authentication callback decides validity per request. | Multi-tenant production, RBAC, JWT, etc. |
 
 ### Invalid combinations (surfaced loudly)
 
 ```sql
 -- token := '' is rejected: empty strings are usually env-var-plumbing accidents.
--- Use token := NULL if you genuinely want unauthenticated loopback mode.
-CALL harbor_serve('harbor:127.0.0.1:9494', token := '');
+-- Use token := NULL if you genuinely want unauthenticated mode.
+CALL harbor_serve(bind := '127.0.0.1', port := 9494, token := '');
 -- → InvalidInputException
 
 -- Custom authn + any token argument is rejected: the callback owns
 -- the decision; a static token would be dead config.
 SET GLOBAL harbor_authentication_function = 'my_authn';
-CALL harbor_serve('harbor:0.0.0.0:9494', token := 'should-be-rejected');
+CALL harbor_serve(bind := '0.0.0.0', port := 9494, token := 'should-be-rejected');
 -- → InvalidInputException
 
 -- The legacy harbor_local_dev_mode setting is rejected on SET.
@@ -123,7 +123,7 @@ SET GLOBAL harbor_local_dev_mode = true;
 
 In `token := NULL` mode harbor still validates protocol framing (Quack's binary `CONNECTION_REQUEST` is parsed and validated; only the credential comparison short-circuits). What it doesn't do is check who you are — it stamps every request with the synthetic `harbor.local-dev` principal and lets it through.
 
-Loopback enforcement is the only thing keeping that safe. `harbor_serve` refuses to start with `token := NULL` on a non-loopback bind. There's no way to expose unauthenticated mode to the network from a single SQL call.
+That is intentionally direct operator control. If you combine `token := NULL` with `bind := '0.0.0.0'`, anyone who can reach the port can execute SQL as the DuckDB process. Use it only on trusted networks or local development.
 
 ---
 
@@ -151,7 +151,7 @@ Replace the default static-token check with a multi-tenant-aware callback:
 ```sql
 .read examples/auth/bearer-table-multi-tenant.sql
 SET GLOBAL harbor_authentication_function = 'harbor_check_token_table';
-CALL harbor_serve('harbor:0.0.0.0:9494');
+CALL harbor_serve(bind := '0.0.0.0', port := 9494);
 ```
 
 Recipes in [`examples/auth/`](examples/auth/):
@@ -196,7 +196,7 @@ location / {
 
 `X-Forwarded-Proto: https` is what triggers harbor's `Secure` flag on the `harbor_session` cookie. `proxy_buffering off` matters because `/sql`'s NDJSON streaming wants chunks delivered as DuckDB produces them.
 
-> 💡 **Reverse-proxy with a loopback bind is still unsafe if the proxy fronts the unauthenticated mode.** `token := NULL` is loopback-only by design; don't expose that loopback through a network proxy.
+> 💡 **Unauthenticated mode is only as private as the bind/proxy in front of it.** If `token := NULL` is reachable through a reverse proxy, LAN bind, VPN, or public interface, anyone who can reach it can run SQL.
 
 ---
 
@@ -228,7 +228,7 @@ the same shape everywhere:
 LOAD harbor;
 SET GLOBAL harbor_query_timeout_s = 30;
 -- Configure authn/authz/CORS here.
-CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 CALL harbor_wait();
 ```
 

@@ -86,8 +86,8 @@ public:
 	// synthetic `harbor.local-dev` principal, and RunAuthentication
 	// returns true unconditionally. All presented credentials
 	// (Bearer / Cookie / X-Harbor-Token / Quack AuthString) are
-	// ignored. Triggered by `harbor_serve(uri, token := NULL)` on a
-	// loopback bind. Snapshotted at server-start; immutable for the
+	// ignored. Triggered by `harbor_serve(..., token := NULL)`.
+	// Snapshotted at server-start; immutable for the
 	// lifetime of the running server.
 	AuthManager(weak_ptr<DatabaseInstance> db, string server_token, bool unauthenticated);
 	~AuthManager();

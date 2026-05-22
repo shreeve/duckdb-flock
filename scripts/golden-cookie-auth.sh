@@ -126,7 +126,7 @@ nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL harbor_cors_origins='https://app.example.com';
 SET GLOBAL ui_remote_url='http://127.0.0.1:${MOCK_PORT}';
-CALL harbor_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

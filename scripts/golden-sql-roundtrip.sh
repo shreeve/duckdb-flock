@@ -59,7 +59,7 @@ SET GLOBAL harbor_max_request_body_bytes=1024;
 -- so the harness exercises session create + transaction state. The
 -- dedicated default-deny matrix lives in scripts/golden-admin-roundtrip.sh.
 SET GLOBAL harbor_allow_admin_without_authz=true;
-CALL harbor_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

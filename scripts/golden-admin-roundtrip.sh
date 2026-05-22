@@ -70,7 +70,7 @@ LOAD '${EXT_PATH}';
 SET GLOBAL harbor_cors_origins='https://app.example.com';
 SET GLOBAL harbor_max_request_body_bytes=1024;
 -- harbor_allow_admin_without_authz NOT set -> default-deny path
-CALL harbor_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -155,7 +155,7 @@ LOAD '${EXT_PATH}';
 SET GLOBAL harbor_cors_origins='https://app.example.com';
 SET GLOBAL harbor_max_request_body_bytes=512;
 SET GLOBAL harbor_allow_admin_without_authz=true;
-CALL harbor_serve('quack:127.0.0.1:${PORT2}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT2}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -380,7 +380,7 @@ CREATE MACRO admin_authz(sid, query) AS (
   END
 );
 SET GLOBAL harbor_authorization_function='admin_authz';
-CALL harbor_serve('quack:127.0.0.1:${PORT3}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT3}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -418,7 +418,7 @@ nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 -- harbor_allow_admin_without_authz NOT set
 SET GLOBAL quack_authorization_function='quack_nop_authorization';
-CALL harbor_serve('quack:127.0.0.1:${PORT4}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT4}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -451,7 +451,7 @@ PORT5="$((PORT + 4))"
 nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL harbor_authorization_function='Harbor_NOP_Authorization';
-CALL harbor_serve('quack:127.0.0.1:${PORT5}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT5}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
@@ -474,7 +474,7 @@ PORT6="$((PORT + 5))"
 nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL harbor_authorization_function='main.harbor_nop_authorization';
-CALL harbor_serve('quack:127.0.0.1:${PORT6}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT6}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

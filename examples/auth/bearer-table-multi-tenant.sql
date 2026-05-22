@@ -18,7 +18,7 @@
 --   .read examples/auth/bearer-table-multi-tenant.sql
 --   SET GLOBAL harbor_authentication_function = 'harbor_table_authn';
 --   CALL harbor_stop();
---   CALL harbor_serve('harbor:127.0.0.1:9494');
+--   CALL harbor_serve(bind := '127.0.0.1', port := 9494);
 
 CREATE TABLE IF NOT EXISTS harbor_principals (
   principal_label VARCHAR NOT NULL,        -- 'alice', 'svc-etl', 'tenant-acme'

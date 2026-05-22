@@ -34,29 +34,41 @@ struct HarborWaitBindData : public TableFunctionData {
 
 namespace {
 
+string HarborUriFromBindPort(const string &bind, uint16_t port) {
+	auto host = bind;
+	StringUtil::Trim(host);
+	if (host.empty()) {
+		throw InvalidInputException("harbor_serve: bind must not be empty");
+	}
+	if (StringUtil::Contains(host, ":") && !(StringUtil::StartsWith(host, "[") && StringUtil::EndsWith(host, "]"))) {
+		host = "[" + host + "]";
+	}
+	return StringUtil::Format("harbor:%s:%d", host, port);
+}
+
 unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto bind_data = make_uniq<HarborLifecycleBindData>();
 	string listen_uri;
-	if (input.inputs.empty()) {
-		listen_uri = "harbor:localhost";
-	} else {
-		auto &uri_value = input.inputs[0];
-		if (uri_value.IsNull() || uri_value.GetValue<string>().empty()) {
-			throw InvalidInputException("Invalid listen string specified");
+	auto bind_iter = input.named_parameters.find("bind");
+	auto port_iter = input.named_parameters.find("port");
+	string bind = "127.0.0.1";
+	uint16_t port = 9494;
+	if (bind_iter != input.named_parameters.end()) {
+		if (bind_iter->second.IsNull()) {
+			throw InvalidInputException("harbor_serve: bind must not be NULL");
 		}
-		listen_uri = uri_value.GetValue<string>();
+		bind = bind_iter->second.GetValue<string>();
 	}
-
-	auto allow_other_hostname = input.named_parameters.find("allow_other_hostname") != input.named_parameters.end() &&
-	                            input.named_parameters["allow_other_hostname"].GetValue<bool>();
+	if (port_iter != input.named_parameters.end()) {
+		if (port_iter->second.IsNull()) {
+			throw InvalidInputException("harbor_serve: port must not be NULL");
+		}
+		port = port_iter->second.GetValue<uint16_t>();
+	}
+	listen_uri = HarborUriFromBindPort(bind, port);
 
 	bind_data->listen_uri = QuackUri(listen_uri, /* server always listens without SSL */ false);
-	if (!allow_other_hostname && !bind_data->listen_uri.IsLocal()) {
-		throw InvalidInputException(
-		    "Only localhost is allowed as a harbor RPC hostname by default, set allow_other_hostname=true to override. "
-		    "We strongly recommend reverse-proxying harbor when making it publicly available.");
-	}
 
 	return_types.emplace_back(LogicalType::VARCHAR);
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -103,20 +115,19 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 		    "callback decides credential validity; the static token would "
 		    "be dead config.\n"
 		    "  - Either omit the `token` argument:\n"
-		    "        CALL harbor_serve('uri');\n"
+		    "        CALL harbor_serve(bind := '127.0.0.1', port := 9494);\n"
 		    "  - Or unset the custom authn function to use static-token auth:\n"
 		    "        RESET GLOBAL harbor_authentication_function;\n"
-		    "        CALL harbor_serve('uri', token := 'your-secret');");
+		    "        CALL harbor_serve(bind := '127.0.0.1', port := 9494, token := 'your-secret');");
 	}
 
-	// Token semantics on harbor_serve(uri, token := <value>):
+	// Token semantics on harbor_serve(bind := ..., port := ..., token := <value>):
 	//
 	//   omitted          → auto-generate a random token (default authn).
 	//   token := 'x'     → use 'x' as the static token (default authn).
 	//   token := NULL    → unauthenticated mode. All auth-bearing
 	//                      routes accept any caller and assign the
 	//                      synthetic 'harbor.local-dev' principal.
-	//                      Refuses to start unless bound to loopback.
 	//   token := ''      → hard error. Empty string is almost always
 	//                      an env-var-plumbing accident; reject loudly.
 	//
@@ -140,13 +151,9 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 			AuthManager::ValidateToken(bind_data->token);
 		}
 	} else if (token_iter->second.IsNull()) {
-		// token := NULL → unauthenticated mode. Loopback bind required.
-		if (!bind_data->listen_uri.IsLocal()) {
-			throw InvalidInputException(
-			    "harbor_serve: token := NULL (unauthenticated mode) requires a loopback bind, but '%s' is not "
-			    "loopback. Either bind to localhost / 127.0.0.1 / [::1], or pass an explicit token.",
-			    bind_data->listen_uri.Uri());
-		}
+		// token := NULL → unauthenticated mode. The operator controls
+		// the bind address explicitly; no-auth on 0.0.0.0 is dangerous
+		// but intentionally expressible.
 		bind_data->token = "";
 		bind_data->unauthenticated = true;
 	} else {
@@ -157,8 +164,8 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 			    "  - To require a static token, pass a non-empty string:\n"
 			    "        token := 'your-secret'\n"
 			    "  - To auto-generate a token, omit the argument:\n"
-			    "        harbor_serve('uri')\n"
-			    "  - To disable authentication (loopback only), pass NULL:\n"
+			    "        harbor_serve(bind := '127.0.0.1', port := 9494)\n"
+			    "  - To disable authentication, pass NULL:\n"
 			    "        token := NULL\n"
 			    "Empty string is rejected because it is a common result of unset "
 			    "environment variables or missing configuration, and would "
@@ -200,12 +207,11 @@ void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &
 
 TableFunctionSet HarborServeFunction::GetFunction() {
 	TableFunctionSet set("harbor_serve");
-	auto fun = TableFunction("harbor_serve", {LogicalType::VARCHAR}, HarborServe, HarborServeBind);
+	auto fun = TableFunction("harbor_serve", {}, HarborServe, HarborServeBind);
 	fun.named_parameters["disable_ssl"] = LogicalType::BOOLEAN; // accepted-but-ignored for upstream parity
-	fun.named_parameters["allow_other_hostname"] = LogicalType::BOOLEAN;
+	fun.named_parameters["bind"] = LogicalType::VARCHAR;
+	fun.named_parameters["port"] = LogicalType::USMALLINT;
 	fun.named_parameters["token"] = LogicalType::VARCHAR;
-	set.AddFunction(fun);
-	fun.arguments.clear();
 	set.AddFunction(fun);
 	return set;
 }

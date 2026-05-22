@@ -124,7 +124,7 @@ They share only `SessionManager`, `AuthManager`, and a `weak_ptr` to the
 | Phase | Trigger | What happens |
 |---|---|---|
 | **Load** | `LOAD harbor;` | Extension registers settings, scalar functions, and the `harbor_serve` / `harbor_stop` / `harbor_wait` table macros. **No socket is bound yet.** |
-| **Start** | `CALL harbor_serve('harbor:0.0.0.0:9494', token => '…')` | Construct `HarborHttpServer`, bind socket synchronously (so `EADDRINUSE` propagates to the caller), spawn listener thread. Returns `(uri, url, token)` row, identical shape to quack. **Returns immediately.** |
+| **Start** | `CALL harbor_serve(bind := '0.0.0.0', port := 9494, token := '…')` | Construct `HarborHttpServer`, bind socket synchronously (so `EADDRINUSE` propagates to the caller), spawn listener thread. Returns `(uri, url, token)` row. **Returns immediately.** |
 | **Block** | `CALL harbor_wait()` | Optional. Blocks the calling SQL session until the server stops or the process receives `SIGINT`/`SIGTERM`. Required for non-interactive container deployments — see "Daemon mode" below. |
 | **Quiesce** | `CALL harbor_stop('harbor:0.0.0.0:9494')` | `Server::stop()` (closes listening socket — no new requests accepted), wait up to `harbor_stop_drain_timeout_s` (default 30s) for in-flight requests to complete naturally, then `Connection::Interrupt()` on every session that's still running a query, join listener thread, close all sessions, drop the `DatabaseInstance` `weak_ptr`. Releases any thread blocked in `harbor_wait()`. |
 | **Restart** | restart of host process | All state is in-memory; restart is the reload primitive. Sub-second when the DB file is warm. |
@@ -146,7 +146,7 @@ would tear down the harbor server. For non-interactive deployments,
 ```sql
 -- /etc/harbor-init.sql
 LOAD harbor;
-CALL harbor_serve('harbor:0.0.0.0:9494');
+CALL harbor_serve(bind := '0.0.0.0', port := 9494);
 CALL harbor_wait();
 ```
 
@@ -173,13 +173,13 @@ the background.
 
 ### URI scheme
 
-harbor uses **`harbor:`** as its primary URI scheme (used by `harbor_serve`)
-and accepts **`quack:`** as an interop alias for client-side `ATTACH`
-from stock upstream Quack.
+harbor's server-start API uses named `bind` / `port` arguments. The
+URI schemes below exist for client-side Quack compatibility and legacy
+parsing helpers; stock upstream Quack clients use `quack:` unchanged.
 
 | URI | Used by |
 |---|---|
-| `harbor:host[:port]` | harbor-aware tools (the eventual harbor client extension). Also accepted as an alias for `quack:` on the server side. |
+| `harbor:host[:port]` | harbor-aware tools / URI parser helper. |
 | `harbor://host[:port]`, `harbor:[ipv6]:port` | RFC-style and IPv6 forms |
 | `quack:host[:port]` | **Stock DuckDB clients with the upstream `quack` extension** loaded. harbor servers accept these unchanged. |
 
@@ -731,10 +731,10 @@ migration message pointing at `token := NULL`.
 
 | Form | Mode | Behavior |
 |---|---|---|
-| `harbor_serve('uri')` | **3 (random)** | Auto-generate a 16-byte hex static token. Default authn (`harbor_check_token` compares request token against this generated value). Returned in the result row. |
-| `harbor_serve('uri', token := 'x')` | **2 (static)** | Operator-supplied static token. Default authn. |
-| `harbor_serve('uri', token := NULL)` | **1 (open dev)** | Unauthenticated. Refuses to start unless the bind is loopback. ALL HTTP routes (`/sql`, `/quack`, `/ddb/*`, `/localEvents`, UI) accept any caller and assign the synthetic principal `harbor.local-dev`. |
-| `harbor_serve('uri', token := '')` | — | **Hard error.** Empty string is almost always an env-var-plumbing accident; rejected loudly with a migration-teaching message. |
+| `harbor_serve()` or `harbor_serve(bind := '...', port := N)` | **3 (random)** | Auto-generate a 16-byte hex static token. Default authn (`harbor_check_token` compares request token against this generated value). Returned in the result row. |
+| `harbor_serve(bind := '...', port := N, token := 'x')` | **2 (static)** | Operator-supplied static token. Default authn. |
+| `harbor_serve(bind := '...', port := N, token := NULL)` | **1 (open)** | Unauthenticated. ALL HTTP routes (`/sql`, `/quack`, `/ddb/*`, `/localEvents`, UI) accept any caller and assign the synthetic principal `harbor.local-dev`. |
+| `harbor_serve(bind := '...', port := N, token := '')` | — | **Hard error.** Empty string is almost always an env-var-plumbing accident; rejected loudly with a migration-teaching message. |
 | Custom `harbor_authentication_function` set + any `token` argument | — | **Hard error.** The custom callback decides validity; a static token would be dead config that misleads operators. Either omit `token` (callback decides) or unset the custom callback (use static-token auth). |
 
 #### Authn function snapshot
@@ -1172,14 +1172,13 @@ restored with `RESET GLOBAL`.
 
 Bearer tokens are configured through `harbor_serve`, not a standalone
 SQL setting: omit `token` to auto-generate, pass `token := '...'` for
-a static token, or pass `token := NULL` for unauthenticated loopback
-mode.
+a static token, or pass `token := NULL` for unauthenticated mode.
 
 Functions:
 
 | Function | Returns | Notes |
 |---|---|---|
-| `harbor_serve(uri, token := <omitted/string/NULL>, allow_other_hostname := false)` | row of `(uri, url, token)` | Starts the server. Omitted token auto-generates; non-empty string sets static-token mode; `NULL` enables unauthenticated loopback mode. **Single-server-per-process**: throws if a server is already running. |
+| `harbor_serve(bind := '127.0.0.1', port := 9494, token := <omitted/string/NULL>)` | row of `(uri, url, token)` | Starts the server. Omitted token auto-generates; non-empty string sets static-token mode; `NULL` enables unauthenticated mode. **Single-server-per-process**: throws if a server is already running. |
 | `harbor_stop(uri)` | `BOOLEAN` | Stops the server bound to URI. Releases any thread blocked in `harbor_wait()`. |
 | `harbor_wait()` | `BOOLEAN` | Blocks the caller until the server stops or the process receives `SIGTERM`/`SIGINT`. Used in container init scripts to keep DuckDB alive. |
 | `harbor_status()` | row of `(running, uri, sessions, uptime_s)` | Introspect server state. |

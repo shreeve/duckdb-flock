@@ -84,8 +84,7 @@ public:
 	// When `unauthenticated` is true, all auth-bearing routes accept
 	// requests without a credential and assign the synthetic
 	// `harbor.local-dev` principal. Triggered by
-	// `harbor_serve(uri, token := NULL)` on a loopback bind. See
-	// SPEC §7.
+	// `harbor_serve(..., token := NULL)`. See SPEC §7.
 	HarborHttpServer(weak_ptr<DatabaseInstance> db, QuackUri uri, string token, bool unauthenticated);
 	~HarborHttpServer();
 

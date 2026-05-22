@@ -62,7 +62,7 @@ pass() { green "PASS: $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
 nohup "${DUCKDB_BIN}" -unsigned -no-stdin -c "
 LOAD '${EXT_PATH}';
 SET GLOBAL harbor_allow_admin_without_authz=true;
-CALL harbor_serve('quack:127.0.0.1:${PORT}', token := '${TOKEN}');
+CALL harbor_serve(bind := '127.0.0.1', port := ${PORT}, token := '${TOKEN}');
 CALL harbor_wait();
 " > "${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

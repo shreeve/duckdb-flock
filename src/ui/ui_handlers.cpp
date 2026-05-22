@@ -344,7 +344,7 @@ std::string UiHandlers::ScopedConnectionKey(const std::string &principal_id, con
 
 AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool require_origin_allowed) {
 	// Delegates to AuthManager. When the server was started with
-	// `harbor_serve(uri, token := NULL)` on a loopback bind,
+	// `harbor_serve(..., token := NULL)`,
 	// AuthenticateRequest short-circuits to the synthetic principal
 	// before this function sees the request, so /sql, /quack,
 	// /ddb/*, and admin all honor unauthenticated mode uniformly.
