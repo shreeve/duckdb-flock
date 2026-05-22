@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/duckdb-harbor-social.png" alt="DuckDB Harbor" width="400">
+</p>
+
 # duckdb-harbor
 
 > **One port for the DuckDB UI, JSON SQL, and Quack RPC — backed by one in-process DuckDB.**
