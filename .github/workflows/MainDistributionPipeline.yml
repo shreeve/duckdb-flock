@@ -115,13 +115,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          pattern: harbor-v1.5.2-extension-*
+          pattern: harbor-v1.5.3-extension-*
 
       - name: Flatten + rename per platform
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          for dir in artifacts/harbor-v1.5.2-extension-*; do
+          for dir in artifacts/harbor-v1.5.3-extension-*; do
             platform="${dir##*-extension-}"
             if [ -f "$dir/harbor.duckdb_extension" ]; then
               cp "$dir/harbor.duckdb_extension" \
