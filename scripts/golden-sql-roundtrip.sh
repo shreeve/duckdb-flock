@@ -240,6 +240,45 @@ curl -sfN -X POST "http://127.0.0.1:${PORT}/sql" -H "Authorization: Bearer ${TOK
 grep -q '"values":\["3"\]' /tmp/harbor-sql-session.ndjson || fail "session transaction state not visible"
 pass "session transaction state survives requests"
 
+# ---- DML ... RETURNING must use select-shaped response ----
+# Vanilla INSERT/UPDATE/DELETE return DuckDB's single-column "Count"
+# pseudo-result and should be write-shaped. The same statements with
+# RETURNING produce real columns and must be surfaced as select-shaped
+# results with columns/data intact.
+curl -sf -X POST "http://127.0.0.1:${PORT}/sql" -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"sql\":\"CREATE TEMP TABLE returning_t (id INTEGER, name VARCHAR)\",\"sessionId\":\"${SID}\"}" >/dev/null
+
+INSERT_RETURNING="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d "{\"sql\":\"INSERT INTO returning_t VALUES (42, 'r') RETURNING *\",\"sessionId\":\"${SID}\"}")"
+echo "${INSERT_RETURNING}" | jq -e \
+    '.ok == true and .kind == "select" and (.columns | length) == 2 and .columns[0].name == "id" and .columns[1].name == "name" and .data == [[42,"r"]] and .rowCount == 1' \
+    >/dev/null || fail "INSERT ... RETURNING should be select-shaped: ${INSERT_RETURNING}"
+pass "INSERT ... RETURNING surfaces columns/data"
+
+UPDATE_RETURNING="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d "{\"sql\":\"UPDATE returning_t SET name = 'rr' WHERE id = 42 RETURNING id, name\",\"sessionId\":\"${SID}\"}")"
+echo "${UPDATE_RETURNING}" | jq -e \
+    '.ok == true and .kind == "select" and (.columns | length) == 2 and .data == [[42,"rr"]] and .rowCount == 1' \
+    >/dev/null || fail "UPDATE ... RETURNING should be select-shaped: ${UPDATE_RETURNING}"
+pass "UPDATE ... RETURNING surfaces columns/data"
+
+DELETE_RETURNING="$(curl -sf -X POST "http://127.0.0.1:${PORT}/sql" \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -d "{\"sql\":\"DELETE FROM returning_t WHERE id = 42 RETURNING id, name\",\"sessionId\":\"${SID}\"}")"
+echo "${DELETE_RETURNING}" | jq -e \
+    '.ok == true and .kind == "select" and (.columns | length) == 2 and .data == [[42,"rr"]] and .rowCount == 1' \
+    >/dev/null || fail "DELETE ... RETURNING should be select-shaped: ${DELETE_RETURNING}"
+pass "DELETE ... RETURNING surfaces columns/data"
+
 DEL="$(curl -s -i -X DELETE "http://127.0.0.1:${PORT}/sql/sessions/${SID}" -H "Authorization: Bearer ${TOKEN}")"
 echo "${DEL}" | grep -qi '^HTTP/1.1 200' || fail "session DELETE expected 200"
 echo "${DEL}" | grep -q '"ok":true' || fail "session DELETE missing ok"

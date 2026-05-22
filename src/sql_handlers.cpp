@@ -28,7 +28,10 @@
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/parser/parsed_data/parse_info.hpp"
 #include "duckdb/parser/sql_statement.hpp"
+#include "duckdb/parser/statement/delete_statement.hpp"
+#include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/statement/update_statement.hpp"
 
 #include <chrono>
 #include <memory>
@@ -502,11 +505,25 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 		}
 	}
 
-	// Prepare + decode params + execute. Capture the statement type
-	// BEFORE the unique_ptr is moved into Prepare, so we can choose
-	// "select" vs "write" response shape after execute.
+	// Prepare + decode params + execute. Capture the statement type and
+	// RETURNING status BEFORE the unique_ptr is moved into Prepare, so
+	// we can choose "select" vs "write" response shape after execute.
 	auto stmt_type = statements[0]->type;
-	bool is_select_statement = (stmt_type == StatementType::SELECT_STATEMENT);
+	bool has_returning = false;
+	switch (stmt_type) {
+	case StatementType::INSERT_STATEMENT:
+		has_returning = !statements[0]->Cast<InsertStatement>().returning_list.empty();
+		break;
+	case StatementType::UPDATE_STATEMENT:
+		has_returning = !statements[0]->Cast<UpdateStatement>().returning_list.empty();
+		break;
+	case StatementType::DELETE_STATEMENT:
+		has_returning = !statements[0]->Cast<DeleteStatement>().returning_list.empty();
+		break;
+	default:
+		break;
+	}
+	bool is_select_statement = (stmt_type == StatementType::SELECT_STATEMENT) || has_returning;
 	auto prepared = conn->Prepare(std::move(statements[0]));
 	if (!prepared || prepared->HasError()) {
 		auto msg = prepared ? prepared->GetError() : "prepare failed";
@@ -624,10 +641,12 @@ void SqlHandlers::HandleSql(const duckdb_httplib_openssl::Request &req,
 	// Choose response shape.
 	auto shape = ChooseShape(req.get_header_value("Accept"));
 
-	// Non-SELECT statements → one-shot write response. We use the
-	// statement type rather than column count because INSERT/UPDATE/
-	// DELETE return a single-column "Count" result that would
-	// otherwise look like a SELECT result of one BIGINT row.
+	// Non-SELECT statements without RETURNING → one-shot write response.
+	// We use statement shape rather than column count because vanilla
+	// INSERT/UPDATE/DELETE return a single-column "Count" pseudo-result
+	// that would otherwise look like a SELECT result of one BIGINT row.
+	// DML with RETURNING is intentionally classified as select-shaped:
+	// it produced real columns that clients asked to receive.
 	if (!is_select_statement) {
 		// Pull the affected-rows count from the result's first row if
 		// available (DuckDB's INSERT/UPDATE/DELETE convention).
