@@ -81,8 +81,34 @@ struct CorsDecision {
 
 class AuthManager {
 public:
-	AuthManager(weak_ptr<DatabaseInstance> db, string server_token);
+	// When `unauthenticated` is true, the auth gate is open:
+	// AuthenticateRequest returns success immediately with the
+	// synthetic `harbor.local-dev` principal, and RunAuthentication
+	// returns true unconditionally. All presented credentials
+	// (Bearer / Cookie / X-Harbor-Token / Quack AuthString) are
+	// ignored. Triggered by `harbor_serve(uri, token := NULL)` on a
+	// loopback bind. Snapshotted at server-start; immutable for the
+	// lifetime of the running server.
+	AuthManager(weak_ptr<DatabaseInstance> db, string server_token, bool unauthenticated);
 	~AuthManager();
+
+	// Public, stable principal id assigned to every request in
+	// unauthenticated mode. Human-readable in audit logs; no colon
+	// (avoids collision with the `__HARBOR_ADMIN__:resource:action`
+	// authz format).
+	static const string &LocalDevPrincipalId();
+
+	// True iff the operator configured a non-default
+	// harbor_authorization_function at server start. Snapshotted at
+	// AuthManager construction; immutable for the running server's
+	// lifetime. Use this from request handlers and from the
+	// start-time WARN-log path. Do NOT call
+	// IsAdminAuthzCustomConfigured(db) per request — that reads live
+	// settings, which would let an authenticated SQL caller redirect
+	// authz mid-process.
+	bool HasCustomAuthzConfigured() const {
+		return snapshot_has_custom_authz_fn;
+	}
 
 	AuthManager(const AuthManager &) = delete;
 	AuthManager &operator=(const AuthManager &) = delete;
@@ -211,6 +237,18 @@ private:
 
 	weak_ptr<DatabaseInstance> db;
 	string server_token;
+	bool unauthenticated;
+
+	// Authn/authz function names resolved ONCE at AuthManager
+	// construction. Request handlers MUST use these snapshots — they
+	// MUST NOT re-read `harbor_authentication_function` /
+	// `harbor_authorization_function` per request. Live reads would
+	// let an authenticated SQL caller `SET GLOBAL` either function
+	// mid-process and silently redirect auth for everyone else.
+	string snapshot_authn_fn_name;
+	string snapshot_authz_fn_name;
+	bool snapshot_has_custom_authn_fn = false;
+	bool snapshot_has_custom_authz_fn = false;
 
 	std::mutex signing_key_mutex;
 	std::vector<uint8_t> signing_key; // 32 random bytes; init on first IssueCookie/VerifyCookie call

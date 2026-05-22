@@ -1,461 +1,324 @@
+<p align="center">
+  <img src="docs/duckdb-harbor-social.png" alt="DuckDB Harbor" width="400">
+</p>
+
 # duckdb-harbor
 
-> **DuckDB as an HTTP service: Quack RPC for DuckDB clients, JSON `/sql` for apps, and the official DuckDB UI — all on one port.**
+> **One port for the DuckDB UI, JSON SQL, and Quack RPC — backed by one in-process DuckDB.**
 
-`harbor` is a single DuckDB extension. When loaded, your DuckDB instance
-turns into a multi-protocol HTTP service. Browser users get the official
-DuckDB UI. Other DuckDB instances can `ATTACH 'quack:host'` and run SQL
-against you. Application code POSTs JSON to `/sql` and gets NDJSON back.
-All on the same port, against the same in-process DuckDB, with the same
-session pool and auth model.
+`harbor` turns a DuckDB process into a small HTTP gateway: open the official DuckDB UI in a browser, run SQL with `curl`, or connect with Quack RPC — all against the same in-process DuckDB, on the same port, with the same auth rules.
 
-> **Status:** v0.1 design baseline. Tracks upstream `duckdb-quack`
-> (`v1.5-variegata`) and `duckdb-ui`. Targets DuckDB v1.5.2; will
-> rebase to DuckDB v2.0 GA when it lands. The full design is in
-> [`SPEC.md`](./SPEC.md).
->
-> **Implementation status:** v0.1 implementation chain merged on `main`.
-> Highlights:
->
-> - **PR-1 / PR-1.5**: Vendored `duckdb-quack` as `harbor.duckdb_extension`;
->   `/quack` runtime roundtrip regression baseline.
-> - **PR-2**: `HarborHttpServer` shared, `harbor_serve` / `_stop` / `_wait`
->   lifecycle, `/health`, `/info`.
-> - **PR-3**: Vendored `duckdb-ui`; `UiHandlers` (`/ddb/*`, `/localEvents`,
->   `/localToken`, GET `/.*` proxy to `ui.duckdb.org`).
-> - **PR-4**: `harbor_crypto` (OpenSSL libcrypto wrapper); HMAC-signed
->   `harbor_session` cookie + `/auth/login` + `/auth/logout`; cookie-gated
->   UI catch-all, `/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`,
->   `/localEvents`; principal-scoped UI connection pool;
->   `harbor_cors_origins` allow-list. Cookie signing key is **ephemeral
->   random per process** in v0.1.
-> - **PR-5**: JSON `/sql` endpoint with NDJSON streaming, one-shot JSON
->   mode, prepared-parameter binding, principal-owned `/sql/sessions`,
->   `OPTIONS /sql` CORS preflight.
-> - **PR-6**: Admin handlers (`/ready`, `/whoami`, `/tables`,
->   `/schema/:db/:t`, `/checkpoint`, `/sessions`, `/interrupt`,
->   `/sql/cancel`). Centralized `__HARBOR_ADMIN__:resource:action`
->   default-deny + `harbor_allow_admin_without_authz` operator opt-in.
-> - **PR-7a–e**: v0.1 hardening series — full CI matrix (9 platforms),
->   `harbor_query_timeout_s` runtime enforcement, `Authorization`
->   scheme tightening + login-page CSP+nonce, full nested-type Mode B
->   param parser (LIST / ARRAY / STRUCT / MAP), comprehensive
->   per-DuckDB-type `/sql` encoding round-trip (62 type assertions).
->
-> The browser flow: open `http://localhost:9494/`, paste the token
-> printed by `harbor_serve()`, the page POSTs to `/auth/login`, sets a
-> `HttpOnly; SameSite=Strict` cookie, reloads, and the cookie-bearing
-> request proxies through to `ui.duckdb.org`. For local dev only,
-> `SET GLOBAL harbor_local_dev_mode = true` (with bind on loopback)
-> skips the token-paste step and uses a synthetic
-> `sha256("__HARBOR_LOCAL_DEV__")` principal so the connection-pool
-> isolation invariant still holds.
+```
+GET  /         DuckDB UI
+POST /sql      JSON SQL endpoint (NDJSON streaming or one-shot JSON)
+POST /quack    Quack binary RPC (for `ATTACH 'quack:host'` clients)
+POST /ddb/*    DuckDB UI backend routes
+```
 
-## Quick Start
+Harbor runs **inside** the DuckDB process — when DuckDB exits, the HTTP server exits with it. It's designed for local tools, notebooks, agents, internal services, and small deployments where you want DuckDB reachable over HTTP without assembling three separate servers and reconciling three separate auth schemes.
+
+---
+
+## Quick start
 
 ```sql
--- Today, from a local build:
-LOAD '/path/to/build/release/extension/harbor/harbor.duckdb_extension';
-
--- After community publication (planned):
--- INSTALL harbor FROM community;
--- LOAD harbor;
-
--- Start the server (returns the URI, URL, and a generated token)
+INSTALL harbor FROM community;
+LOAD harbor;
 CALL harbor_serve('harbor:127.0.0.1:9494');
 ```
 
-```
-┌─────────────────────────────┬───────────────────────┬─────────────────────────────────┐
-│           uri               │         url           │             token               │
-├─────────────────────────────┼───────────────────────┼─────────────────────────────────┤
-│ harbor:127.0.0.1:9494       │ http://127.0.0.1:9494 │ a1b2c3d4e5f6...                 │
-└─────────────────────────────┴───────────────────────┴─────────────────────────────────┘
-```
-
-Open `http://127.0.0.1:9494/`. harbor asks you to **paste the token
-once**, then the official DuckDB UI loads and stays authenticated for
-the session.
-
-> **Heads-up for non-interactive use.** `harbor_serve` returns
-> immediately so you can keep using your DuckDB REPL. To run harbor as a
-> daemon (containers, systemd) you need to keep the DuckDB process
-> alive: call `CALL harbor_wait();` after `harbor_serve`. See
-> [Deployment](#deployment--incus--zfs).
-
-## What It Does
-
-`harbor` runs **one HTTP server on one port** and serves three protocols
-simultaneously, all backed by the same in-process DuckDB instance:
-
-```
-                         ┌─────────────────────────────────┐
-                         │  DuckDB process                 │
-                         │  ┌───────────────────────────┐  │
-                         │  │ harbor extension          │  │
-   ┌──────────┐          │  │  one HTTP server          │  │
-   │ Browser  │─────────▶│  │  one port (:9494)         │  │ ── /data/db.duckdb
-   │ (UI)     │          │  │  shared session pool      │  │    (or :memory:)
-   └──────────┘          │  │  shared auth model        │  │
-                         │  └────┬──────┬───────┬───────┘  │
-   ┌──────────┐          │       │      │       │          │
-   │  duckdb  │─────────▶│  /quack    /sql   /ddb/*        │
-   │  CLI     │          │       │      │       │          │
-   └──────────┘          │       │      │       │          │
-                         └───────┼──────┼───────┼──────────┘
-   ┌──────────┐                  │      │       │
-   │  Bun /   │──────────────────┘      │       │
-   │  Python /│─────────────────────────┘       │
-   │  Go /etc │                                 │
-   └──────────┘                                 │
-                                                │
-   ┌──────────┐                                 │
-   │ Browser  │─────────────────────────────────┘
-   │ (UI)     │
-   └──────────┘
+```text
+┌───────────────────────┬───────────────────────┬──────────────────────────────────┐
+│       listen_uri      │       listen_url      │            auth_token            │
+├───────────────────────┼───────────────────────┼──────────────────────────────────┤
+│ harbor:127.0.0.1:9494 │ http://127.0.0.1:9494 │ a1b2c3d4e5f67890abcdef1234567890 │
+└───────────────────────┴───────────────────────┴──────────────────────────────────┘
 ```
 
-| Audience | Endpoint | Protocol |
-|---|---|---|
-| Stock DuckDB clients (CLI, Wasm, notebooks, anything that loads the upstream `quack` extension) | `POST /quack` | Quack RPC — `application/vnd.duckdb` binary, single round-trip per query, parallel `FETCH` for big results |
-| App code in any language | `POST /sql` | JSON in, NDJSON out, schema-typed, sticky sessions for transactions |
-| Browser users | `GET /` | The official DuckDB UI |
-| Monitoring / scripts / ops | `GET /health`, `/ready`, `/tables`, `/schema/...`, `/whoami`, `POST /checkpoint`, `GET /sessions`, `POST /interrupt` | JSON |
+Open `http://127.0.0.1:9494/` in a browser. The page asks for the token once, sets a `HttpOnly; SameSite=Strict` cookie, then the official DuckDB UI loads.
 
-Writes through any one of these are immediately visible to all the others.
-Zero duplication, zero sync.
-
-> **"Isn't this just the Quack extension + an httpserver extension + the
-> DuckDB UI extension?"** Those are the inputs; the integration is the
-> value. One auth model across three protocols, one port, one config
-> surface, one log stream, one production deploy artifact, with
-> type-correct streaming JSON and wire compat with stock clients.
-> Full breakdown — what each input gives you in stock form, what
-> harbor adds beyond the sum, and what harbor explicitly is *not* —
-> in [`docs/WHY_HARBOR.md`](docs/WHY_HARBOR.md).
-
-## Ways to Connect
-
-### 1. Browser — Official DuckDB UI
-
-Open `http://localhost:9494/` and you get the full DuckDB notebook:
-SQL notebooks, syntax highlighting, tab completion, query history, data
-exploration. By default, `harbor` proxies the UI assets from
-`ui.duckdb.org` (matching the upstream `duckdb-ui` extension behavior).
-For air-gapped or restricted-egress deployments, point
-`harbor_ui_proxy_url` at an internal HTTP mirror of `ui.duckdb.org`
-(a 10-line nginx config); `harbor_ui_assets = 'disabled'` opts out
-entirely. The proxy strips all harbor-auth headers (`Cookie`,
-`Authorization`, `X-Harbor-Token`) before forwarding upstream. A
-compiled-in `bundled` mode is planned for v0.2 if true
-no-internal-mirror air-gap demand emerges. The `/ddb/*` binary
-protocol is unaffected by the asset mode.
-
-The first time you visit, harbor asks for the token printed by
-`harbor_serve` and issues an HTTP-only cookie. After that, the UI works
-unmodified.
-
-### 2. Stock `duckdb` CLI — `ATTACH 'quack:host'`
-
-Any DuckDB with the upstream `quack` extension installed can attach a
-harbor server as a first-class catalog. The wire protocol on `/quack`
-is exactly upstream Quack — harbor is a strict superset.
+Hit `/sql` from anywhere:
 
 ```bash
-duckdb
-```
-```sql
-INSTALL quack FROM core_nightly;
-LOAD quack;
+TOKEN='a1b2c3d4e5f67890abcdef1234567890'
 
-CREATE SECRET (
-  TYPE quack,
-  TOKEN 'a1b2c3d4...',                        -- the token from harbor_serve
-  SCOPE 'quack:127.0.0.1:9494'
-);
-
-ATTACH 'quack:127.0.0.1:9494' AS r (TYPE quack);
-SHOW TABLES FROM r;
-SELECT * FROM r.users WHERE active = true LIMIT 10;
-
--- Transactions work end-to-end
-BEGIN; INSERT INTO r.t VALUES (1); COMMIT;
-
--- Filter and projection pushdown happen automatically
-EXPLAIN SELECT id, name FROM r.users WHERE id = 42;
-```
-
-> Stock DuckDB-Quack clients use the `quack:` URI scheme. harbor servers
-> also accept `harbor:` for tooling that's harbor-aware; the two resolve
-> to the same handler.
-
-### 3. Plain HTTP — any language, any tool
-
-The JSON API at `/sql` accepts parameterized queries and streams NDJSON
-back. Works from any language that speaks HTTP.
-
-```bash
-curl -X POST http://localhost:9494/sql \
-  -H "Authorization: Bearer $HARBOR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"sql":"SELECT * FROM users WHERE id = $1","params":[42]}'
-```
-
-```ndjson
-{"type":"schema","sessionId":"9f3c...","columns":[{"name":"id","duckdbType":"INTEGER"},{"name":"name","duckdbType":"VARCHAR"}]}
-{"type":"row","values":[42,"Alice"]}
-{"type":"end","rowCount":1,"timeMs":3}
-```
-
-For a single-shot non-streamed JSON response, ask for `Accept: application/json`:
-
-```bash
-curl -X POST http://localhost:9494/sql \
-  -H "Authorization: Bearer $HARBOR_TOKEN" \
-  -H "Accept: application/json" \
+curl http://127.0.0.1:9494/sql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
   -d '{"sql":"SELECT 42 AS answer"}'
 ```
 
 ```json
-{
-  "ok": true,
-  "kind": "select",
-  "sessionId": "9f3c...",
-  "columns": [{"name":"answer","duckdbType":"INTEGER"}],
-  "data": [[42]],
-  "rowCount": 1,
-  "timeMs": 1
+{"ok":true,"kind":"select","columns":[{"name":"answer","duckdbType":"INTEGER","lossless":true}],"data":[[42]],"rowCount":1,"timeMs":0}
+```
+
+Or attach from a second DuckDB instance over Quack RPC:
+
+```sql
+-- in another DuckDB session:
+INSTALL quack FROM community;
+LOAD quack;
+CREATE SECRET harbor_remote (TYPE quack, AUTH_TOKEN 'a1b2c3...');
+ATTACH 'quack:127.0.0.1:9494' AS remote (SECRET harbor_remote);
+SELECT * FROM remote.main.your_table;
+```
+
+> **Heads-up for non-interactive use.** `harbor_serve` returns immediately so your DuckDB REPL stays usable. To run as a daemon (containers, systemd) — keep the process alive with `CALL harbor_wait();` after `harbor_serve(...)`.
+
+---
+
+## Why harbor?
+
+DuckDB already has the pieces:
+
+- the official **DuckDB UI** for interactive work,
+- **Quack** for binary RPC clients,
+- various **httpserver-style** community extensions for HTTP + SQL.
+
+Harbor combines the useful deployment shape:
+
+> **One DuckDB, one port, three protocols, one auth decision.**
+
+The hard part isn't starting an HTTP server. The hard part is making the browser UI, API clients, and RPC clients share the same identity, authorization rules, CORS policy, and database state. Stacking three independent extensions side-by-side gets you three servers, three ports, three auth dances, three logs, and three lifecycle stories. Harbor gives them one shared boundary:
+
+- **One port, three surfaces.** UI in a browser, JSON SQL from any HTTP client, Quack RPC for stock DuckDB clients — all against the same in-process DuckDB.
+- **One auth/authz boundary.** Browser-friendly cookies and API-friendly bearer tokens use the same principal; one `harbor_authorization_function` runs for every SQL-bearing request, including admin endpoints.
+- **Sessions tied to the authenticated principal.** Browser and API requests can't accidentally share state across users; wrong-principal session lookups return `404 SESSION_NOT_FOUND` instead of leaking ids.
+- **Typed JSON + NDJSON streaming.** `BIGINT` / `HUGEINT` / `DECIMAL` as JSON strings (preserves precision in JS clients), `MAP<K,V>` as array-of-pairs (non-string keys, ordered), `INTERVAL` as `{months, days, micros}`. Round-trip tested per type. `/sql` streams `DataChunk`s with mid-stream error reporting.
+- **Wire compatibility with stock clients.** A vanilla DuckDB with the upstream `quack` extension can `ATTACH 'quack:host'` against harbor without modification. The official DuckDB UI works against `GET /` and `POST /ddb/*` byte-for-byte.
+
+---
+
+## Authentication modes
+
+Harbor has three operational postures, all selected at `harbor_serve` time. There is **no `harbor_local_dev_mode` setting** — the token argument value picks the mode.
+
+| Call | Meaning | Use |
+|---|---|---|
+| `harbor_serve('harbor:host:port')` | Auto-generate a random token. Default authentication. | Local dev or quick demo. |
+| `harbor_serve('harbor:host:port', token := 'my-secret')` | Operator-supplied static token. Default authentication. | Single-operator service. |
+| `harbor_serve('harbor:127.0.0.1:9494', token := NULL)` | **Unauthenticated.** All routes accept any caller; synthetic principal is `harbor.local-dev`. **Refuses to start unless bound to loopback.** | Local development without the token-paste step. |
+| Custom `harbor_authentication_function` + omitted `token` | Operator-defined authentication callback decides validity per request. | Multi-tenant production, RBAC, JWT, etc. |
+
+### Invalid combinations (surfaced loudly)
+
+```sql
+-- token := '' is rejected: empty strings are usually env-var-plumbing accidents.
+-- Use token := NULL if you genuinely want unauthenticated loopback mode.
+CALL harbor_serve('harbor:127.0.0.1:9494', token := '');
+-- → InvalidInputException
+
+-- Custom authn + any token argument is rejected: the callback owns
+-- the decision; a static token would be dead config.
+SET GLOBAL harbor_authentication_function = 'my_authn';
+CALL harbor_serve('harbor:0.0.0.0:9494', token := 'should-be-rejected');
+-- → InvalidInputException
+
+-- The legacy harbor_local_dev_mode setting is rejected on SET.
+SET GLOBAL harbor_local_dev_mode = true;
+-- → InvalidInputException pointing at token := NULL
+```
+
+### What "unauthenticated" means concretely
+
+In `token := NULL` mode harbor still validates protocol framing (Quack's binary `CONNECTION_REQUEST` is parsed and validated; only the credential comparison short-circuits). What it doesn't do is check who you are — it stamps every request with the synthetic `harbor.local-dev` principal and lets it through.
+
+Loopback enforcement is the only thing keeping that safe. `harbor_serve` refuses to start with `token := NULL` on a non-loopback bind. There's no way to expose unauthenticated mode to the network from a single SQL call.
+
+---
+
+## Authorization
+
+Authentication answers **who** is calling. Authorization answers **what they can do**, and is fully orthogonal — all three authentication modes pair with whatever `harbor_authorization_function` you configure.
+
+The default authorization callback (`harbor_nop_authorization`) returns `TRUE` for every query except `__HARBOR_ADMIN__:resource:action` synthetic queries (the keys harbor uses for admin endpoints like `/tables`, `/checkpoint`, `/sessions`, `/interrupt`). Those are **default-deny** unless you either:
+
+1. Configure a custom `harbor_authorization_function` that grants specific resource:action pairs to specific principals (see [`examples/auth/rbac-authorization.sql`](examples/auth/rbac-authorization.sql)), OR
+2. Set `harbor_allow_admin_without_authz = TRUE` to allow every authenticated principal through (operator opt-in for trusted single-user deployments).
+
+> ⚠️ **Harbor exposes SQL execution.** Anyone authenticated to harbor can do whatever the underlying DuckDB process can do — read any table, `ATTACH` to remote data, `LOAD` extensions, write files to disk — unless your `harbor_authorization_function` denies it. Authentication tells harbor who's at the door; authorization tells the door what to do. Production multi-tenant deployment requires both. See [`examples/auth/`](examples/auth/) for recipes.
+
+---
+
+## Production hardening
+
+`harbor_serve` works out of the box for development. For anything reachable beyond your laptop, the four levers that matter:
+
+### 1. Authentication callback
+
+Replace the default static-token check with a multi-tenant-aware callback:
+
+```sql
+.read examples/auth/bearer-table-multi-tenant.sql
+SET GLOBAL harbor_authentication_function = 'harbor_check_token_table';
+CALL harbor_serve('harbor:0.0.0.0:9494');
+```
+
+Recipes in [`examples/auth/`](examples/auth/):
+- `bearer-only-static.sql` — single shared token from a row.
+- `bearer-table-multi-tenant.sql` — token-per-principal table; revoke by `UPDATE active = FALSE`.
+- `bearer-with-expiry.sql` — tokens carry `valid_until`.
+- `rbac-authorization.sql` — pair with any of the above for admin-endpoint gating.
+
+### 2. CORS allow-list
+
+If browsers will hit `/sql` or `/info` from a different origin than harbor itself:
+
+```sql
+SET GLOBAL harbor_cors_origins = 'https://app.example.com';
+-- multiple: 'https://a.example.com;https://b.example.com'
+```
+
+`'*'` is **explicitly rejected** at `harbor_serve` time — wildcard CORS on credential-bearing endpoints is unsafe.
+
+### 3. Query timeout
+
+```sql
+SET GLOBAL harbor_query_timeout_s = 30;     -- 0 = no limit
+```
+
+Catches runaway queries with `HTTP 504 + errorCode: "QUERY_TIMEOUT"` (or a mid-stream `{"type":"error","code":"QUERY_TIMEOUT"}` line on streaming `/sql`).
+
+### 4. Reverse proxy + TLS
+
+Bind harbor on `127.0.0.1` and front it with nginx / Caddy / Traefik for TLS termination. The minimum config:
+
+```nginx
+location / {
+    proxy_pass         http://127.0.0.1:9494;
+    proxy_http_version 1.1;
+    proxy_set_header   Host              $host;
+    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header   X-Forwarded-Proto $scheme;     # required for Secure cookies
+    proxy_buffering    off;                            # NDJSON streaming
 }
 ```
 
-#### Sticky transactions
+`X-Forwarded-Proto: https` is what triggers harbor's `Secure` flag on the `harbor_session` cookie. `proxy_buffering off` matters because `/sql`'s NDJSON streaming wants chunks delivered as DuckDB produces them.
 
-Transactions and other multi-statement state require an explicit DB
-session, created up front:
+> 💡 **Reverse-proxy with a loopback bind is still unsafe if the proxy fronts the unauthenticated mode.** `token := NULL` is loopback-only by design; don't expose that loopback through a network proxy.
 
-```bash
-# 1. Create a persistent DB session
-SID=$(curl -sf -X POST http://localhost:9494/sql/sessions/new \
-        -H "Authorization: Bearer $HARBOR_TOKEN" | jq -r .sessionId)
+---
 
-# 2. Run statements against it
-for SQL in 'BEGIN' 'INSERT INTO t VALUES (1)' 'INSERT INTO t VALUES (2)' 'COMMIT'; do
-  curl -X POST http://localhost:9494/sql \
-    -H "Authorization: Bearer $HARBOR_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"sql\":\"$SQL\",\"sessionId\":\"$SID\"}"
-done
-
-# 3. Optional cleanup (also auto-expires after harbor_session_ttl_s)
-curl -X DELETE http://localhost:9494/sql/sessions/$SID \
-  -H "Authorization: Bearer $HARBOR_TOKEN"
-```
-
-Requests without a `sessionId` get an ephemeral session and cannot
-issue `BEGIN` (rejected with `BAD_REQUEST`). This prevents transactions
-from being silently abandoned.
-
-### 4. DuckDB-Wasm in a browser
-
-DuckDB-Wasm builds with the `quack` extension can `ATTACH` a harbor
-server directly. Caveats apply: same-origin policy, mixed-content
-restrictions, and HTTPS for any non-localhost target.
-
-### 5. Minimal HTTP endpoints — scripts, monitoring, ops
-
-| Endpoint | Method | Auth | Description |
-|---|---|---|---|
-| `/health` | GET | public | Process health — `{ok, version, uptime_s}` |
-| `/ready` | GET | public | DB readiness — runs `SELECT 1`, returns 503 on failure |
-| `/info` | GET | public | Version headers (used by the DuckDB UI to detect server) |
-| `/whoami` | GET | bearer/cookie | Identity + runtime info, JSON form of `whoami()` |
-| `/tables` | GET | bearer/cookie + authz | List tables in `main` |
-| `/schema/:db/:table` | GET | bearer/cookie + authz | Column list + types (404 if missing) |
-| `/checkpoint` | POST | admin authz | Run `CHECKPOINT;` — typically before a ZFS snapshot |
-| `/sessions` | GET | admin authz | Live sessions |
-| `/interrupt` | POST | admin authz | Interrupt a session's running query |
-
-### Which one should I use?
-
-| Task | Best fit |
-|---|---|
-| Interactive exploration, ad-hoc queries | Browser UI |
-| Cross-DB attach, joins, copying data between DuckDBs | upstream `quack` extension + `ATTACH 'quack:host'` |
-| App code (transactions, prepared queries, your data layer) | `POST /sql` |
-| One-off shell scripts, integrations from non-DuckDB services | `POST /sql` with `Accept: application/json` |
-| Monitoring / health checks | `/health`, `/ready` |
-| Cron-driven backup before snapshot | `POST /checkpoint` then `zfs snapshot` |
-
-## Features
-
-- **Single binary, single port.** One DuckDB extension; one HTTP server.
-- **Three protocols, one DuckDB instance.** Quack RPC, JSON SQL, and the official UI all share state.
-- **Session-bound transactions.** `BEGIN…COMMIT`, `SET VARIABLE`, `CREATE TEMP TABLE` all survive across HTTP calls when you pass an explicit `sessionId`.
-- **Pluggable auth.** Token + per-connection authentication and per-query authorization, as user-supplied SQL macros. One model covers `/quack`, `/sql`, `/ddb/run`, and admin endpoints.
-- **Streaming `/sql`.** Large result sets stream as NDJSON over chunked transfer encoding.
-- **Schema-typed encoding.** `/sql` NDJSON encodes every DuckDB core type losslessly when decoded with the schema record (DECIMAL preserves width/scale, TIMESTAMP preserves precision, INTERVAL preserves all three components, BIGINT/HUGEINT as strings to dodge JS precision loss).
-- **UI assets via proxy.** Default forwards to `ui.duckdb.org`; point `harbor_ui_proxy_url` at an internal mirror for restricted-egress deployments. The proxy strips all harbor-auth headers from outbound requests. A compile-in `bundled` mode is planned for v0.2 (deferred from v0.1 — most "air-gap" deployments are better served by an internal HTTP mirror, which works today with no harbor change).
-- **Upstream-compatible Quack.** Stock DuckDB clients work without modification.
-- **Container-ready.** Designed to be deployed as `duckdb -no-stdin -init harbor-init.sql /data/db.duckdb` against a ZFS dataset.
-
-## How It's Built
-
-`harbor` is a single DuckDB extension forked from two upstream projects:
-
-| Source | License | What we use |
-|---|---|---|
-| [`duckdb/duckdb-quack`](https://github.com/duckdb/duckdb-quack) `v1.5-variegata` | MIT | Quack wire protocol, session pool, auth hooks, `ATTACH` catalog, the cpp-httplib server |
-| [`duckdb/duckdb-ui`](https://github.com/duckdb/duckdb-ui) | MIT | DuckDB UI binary protocol (`/ddb/run`, `/ddb/tokenize`, `/ddb/interrupt`), tokenizer, asset proxy |
-
-harbor adds the `/sql` JSON/NDJSON endpoint, an HMAC-signed auth-cookie
-flow for the browser UI, the asset bundling story, the admin/ops
-endpoints, the unified auth model, and the refactor that puts both
-Quack and UI handlers on a single shared `cpp-httplib::Server`
-instance.
-
-The bulk of the new code is the `DataChunk → NDJSON` encoder for
-`/sql` (handles every DuckDB core type per [`SPEC.md`](./SPEC.md) §5.4)
-and the auth-cookie layer (HMAC sign/verify, login/logout endpoints,
-harbor login wrapper at `GET /`).
-
-## Security
-
-harbor is **trusted-network software** by default. The auth token grants
-full SQL access to the underlying DuckDB — treat it as a database
-password.
-
-- **Default bind:** `127.0.0.1` — reachable only from the local machine.
-- **Public routes:** `GET /health`, `GET /ready`, `GET /info`, `GET /.*` (UI assets), and `OPTIONS /quack` (CORS preflight). Everything else requires authentication.
-- **Browser-origin requests do NOT bypass token auth.** The `Origin` check is CSRF defence; the auth cookie (issued by `POST /auth/login`) carries identity.
-- **`/localToken`** (used to bridge MotherDuck auth into the local UI) is automatically disabled when bound to a non-loopback address.
-- **For network exposure**, front harbor with nginx or Caddy doing TLS termination — recipe in [`docs/REVERSE_PROXY.md`](./docs/REVERSE_PROXY.md). Your reverse proxy **must** forward `X-Forwarded-Proto: https` (or the browser's request must have `Origin: https://…`) so harbor sets the `Secure` attribute on issued `harbor_session` cookies. Without that header, cookies are issued without `Secure`, which is acceptable on plain-HTTP loopback dev but unsafe over a public HTTPS deployment. nginx default config (`proxy_set_header X-Forwarded-Proto $scheme;`) does the right thing.
-- **CORS** is blocked by default. Allow specific origins via `harbor_cors_origins`. The setting accepts a comma-separated list of `scheme://host[:port]` entries (no path, no query, no fragment, no trailing slash); `harbor_serve` refuses to start if it sees `'*'` or a malformed entry.
-
-Authentication and authorization are **two pluggable SQL functions**:
-
-```sql
--- Multi-token table for per-user keys
-CREATE TABLE harbor_tokens (token VARCHAR, user_name VARCHAR);
-INSERT INTO harbor_tokens VALUES
-  ('alice-key-...', 'alice'),
-  ('bob-key-...',   'bob');
-
-CREATE MACRO check_token(sid, client_token, server_token) AS (
-  EXISTS (SELECT 1 FROM harbor_tokens WHERE token = client_token)
-);
-SET GLOBAL harbor_authentication_function = 'check_token';
-
--- Read-only authorization (admin endpoints use synthetic SQL of shape
--- '__HARBOR_ADMIN__:<resource>:<action>' — e.g. '__HARBOR_ADMIN__:checkpoint:create',
--- '__HARBOR_ADMIN__:sessions:list' — so policies can branch on prefix or pair)
-CREATE MACRO authz(sid, query) AS (
-  CASE
-    WHEN starts_with(query, '__HARBOR_ADMIN__:')
-      THEN false                                      -- no admin ops via this hook
-    ELSE
-      regexp_matches(upper(trim(query)),
-                     '^(SELECT|FROM|WITH|EXPLAIN|DESCRIBE|SHOW)\b')
-  END
-);
-SET GLOBAL harbor_authorization_function = 'authz';
-```
-
-Full security model in [`SPEC.md`](./SPEC.md) §7.
-
-## Deployment — Incus + ZFS
-
-The intended deployment shape:
-
-```
-host
-├── /tank/duckdb/<tenant>/                  ← ZFS dataset (COW snapshots)
-│   ├── db.duckdb
-│   ├── harbor-init.sql                      ← LOAD harbor; harbor_serve(...); harbor_wait();
-│   └── harbor-token
-└── incus container "harbor-<tenant>"
-    ├── /usr/bin/duckdb
-    ├── /root/.duckdb/extensions/.../harbor.duckdb_extension
-    └── /data → bind-mount of /tank/duckdb/<tenant>/
-```
-
-The container's `ENTRYPOINT` is one command:
-
-```bash
-duckdb -no-stdin -init /data/harbor-init.sql /data/db.duckdb
-```
-
-Where `harbor-init.sql` is:
-
-```sql
-LOAD harbor;
-CALL harbor_serve('harbor:0.0.0.0:9494');
-CALL harbor_wait();              -- blocks until SIGTERM/SIGINT
-```
-
-`harbor_wait()` is required: without it, the DuckDB CLI exits as soon as
-the init script finishes and takes the server with it.
-
-Operations collapse to ZFS verbs:
-
-| Task | Command |
-|---|---|
-| Snapshot | `POST /checkpoint && zfs snapshot tank/duckdb/<tenant>@hourly-…` |
-| Clone for staging | `zfs clone …@last-good …-staging && incus launch harbor-image …` |
-| Restore | `zfs rollback …@some-snapshot && incus restart …` |
-| Move host | `zfs send | ssh other zfs receive && incus copy …` |
-| Upgrade harbor | drop new `.duckdb_extension` into image, `incus restart` |
-
-Full guide: [`docs/DEPLOY_INCUS_ZFS.md`](./docs/DEPLOY_INCUS_ZFS.md).
-
-## Configuration
-
-All settings are regular DuckDB session/global options.
+## Settings reference (the ones you'll touch)
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `harbor_bind` | `127.0.0.1` | Bind address |
-| `harbor_port` | `9494` | Listen port |
-| `harbor_token` | (auto-generated) | Auth token |
-| `harbor_authentication_function` | `harbor_check_token` | SQL function name for auth callback |
-| `harbor_authorization_function` | `harbor_nop_authorization` | SQL function name for authz callback |
-| `harbor_cookie_signing_key` | (auto, per-process) | HMAC key for `harbor_session` cookies |
-| `harbor_max_sessions` | `1024` | Max concurrent DB sessions |
-| `harbor_session_ttl_s` | `3600` | Idle session TTL |
-| `harbor_query_timeout_s` | `0` | Per-query timeout (0 disables) |
-| `harbor_max_request_body_bytes` | `268435456` (256 MiB) | Per-request body cap |
-| `harbor_ui_assets` | `proxy` | `proxy` / `disabled` (v0.1; `bundled` planned for v0.2) |
-| `harbor_ui_proxy_url` | `https://ui.duckdb.org` | Upstream URL when `harbor_ui_assets = 'proxy'` |
-| `harbor_cors_origins` | `''` | Allow-list for cross-origin browser requests |
-| `harbor_log_requests` | `true` | Per-request structured log |
-| `harbor_log_queries` | `false` | Log full SQL of every query |
+| `harbor_authentication_function` | `harbor_check_token` | Name of the SQL function that validates credentials. |
+| `harbor_authorization_function` | `harbor_nop_authorization` | Name of the SQL function that authorizes per-statement. |
+| `harbor_cors_origins` | `''` | Allow-list for cross-origin browser requests. `'*'` is rejected. |
+| `harbor_query_timeout_s` | `0` | Per-query wall-clock limit. `0` disables. |
+| `harbor_max_sessions` | `1024` | Max concurrent DB sessions. |
+| `harbor_allow_admin_without_authz` | `false` | Operator opt-in: allow any authenticated principal on admin endpoints. |
+| `harbor_max_request_body_bytes` | `268435456` | 256 MB per-request body cap. |
 
-Full reference in [`SPEC.md`](./SPEC.md) §9.
+Auth/authz settings are **snapshotted at `harbor_serve` startup**. Mid-process `SET GLOBAL` does not affect a running server — restart to apply. (This is what stops an authenticated SQL caller from redirecting auth for everyone else mid-process.)
 
-## Roadmap
+For the full settings list, route-by-route protocol details, error-code tables, and threat model, see [`SPEC.md`](./SPEC.md).
 
-Explicitly out of scope for v0.1 (see [`docs/ROADMAP.md`](./docs/ROADMAP.md)
-for the full list):
+---
 
-- Arrow stream output on `/sql` (`Accept: application/vnd.apache.arrow.stream`)
-- `/metrics` Prometheus endpoint
-- WebSocket transport for `/sql`
-- Built-in TLS
-- Multi-tenant proxy in front of N harbors (lives in a separate ops project)
+## Running as a service
 
-## Requirements
+Harbor is just a DuckDB process with the extension loaded. To run it
+under `systemd`, Docker, Incus, Kubernetes, or your own supervisor, use
+the same shape everywhere:
 
-- **DuckDB** v1.5.2 (each harbor release pins to a specific DuckDB version)
-- **Reverse proxy** (nginx, Caddy, Traefik) recommended for TLS termination
-  if exposing beyond localhost
+```sql
+LOAD harbor;
+SET GLOBAL harbor_query_timeout_s = 30;
+-- Configure authn/authz/CORS here.
+CALL harbor_serve('harbor:127.0.0.1:9494');
+CALL harbor_wait();
+```
+
+`harbor_wait()` keeps the DuckDB process alive until SIGTERM/SIGINT or
+`harbor_stop()`. Put that SQL in whatever bootstrap file your process
+manager feeds to `duckdb`.
+
+After deploying, validate with:
+
+```bash
+scripts/validate-deployment.sh http://127.0.0.1:9494 "$TOKEN"
+```
+
+The script runs ~30 HTTP-level assertions (liveness, `/sql` happy paths, auth invariants, CORS allow-list, admin endpoint gating) and exits non-zero on any failure.
+
+For load testing:
+
+```bash
+scripts/load-test.sh http://127.0.0.1:9494 "$TOKEN"
+```
+
+Auto-detects [`oha`](https://github.com/hatoo/oha) or [`wrk`](https://github.com/wg/wrk) for accurate measurement; falls back to a `curl` loop with a clear "this measures shell overhead, not harbor" warning.
+
+---
+
+## Common gotchas
+
+- **`SET GLOBAL`, not `SET`** for any auth-related setting. Auth runs in transient connections that don't see session-local settings.
+- **`harbor_serve` is single-server-per-process.** A second call before `harbor_stop` throws.
+- **`CALL harbor_wait();`** at the end of any non-interactive `duckdb -c "..."` invocation, otherwise the CLI exits and the server dies with it.
+- **Auth/authz settings are snapshotted at server start.** Mid-process `SET GLOBAL` has no effect on the running server until the next `harbor_serve`.
+- **Cookie signing key is ephemeral per process.** Restarting harbor logs out every browser session. Bearer tokens and the auth-function table data survive — only cookies don't.
+- **Browser-origin requests do NOT bypass auth.** `Origin` is a CSRF defense, not authentication.
+
+---
+
+## When *not* to use harbor
+
+Harbor is **not**:
+
+- **A managed DuckDB service.** [MotherDuck](https://motherduck.com) gives you that. Harbor is the host-it-yourself shape.
+- **A database.** One DuckDB process, one storage. No replication, no multi-database tenancy. If you want a sharded analytical database, harbor isn't it; if you want one DuckDB exposed cleanly over HTTP, it is.
+- **A SQL parser or proxy.** Harbor doesn't analyze or rewrite SQL by default. The authz callback can inspect SQL text if you wire it up — but harbor itself is protocol-level, not query-level.
+- **A replacement for stock Quack.** Harbor *is* stock Quack (vendored verbatim) plus the rest. If you only want Quack RPC and nothing else, use stock Quack — fewer moving parts.
+
+---
+
+## Status
+
+Harbor targets the DuckDB v1.5.x line (currently pinned to **v1.5.3**). It's published in the [DuckDB community-extensions registry](https://duckdb.org/community_extensions/) so for nearly every user, install is the one-liner above.
+
+Available platforms:
+
+- macOS (Apple Silicon + Intel)
+- Linux (x86_64 + ARM64)
+- Windows x86_64
+- DuckDB-Wasm (mvp / eh / threads)
+
+Pre-release binaries are also attached to each [GitHub Release](https://github.com/shreeve/duckdb-harbor/releases) for testing ahead of the registry. Use those with `LOAD '/abs/path/...'` and `duckdb -unsigned`.
+
+---
+
+## Contributing
+
+- [`SPEC.md`](./SPEC.md) — design source of truth (architecture, auth/authz model, threat model, wire format, settings).
+- [`AGENTS.md`](./AGENTS.md) — contributor map and rebase notes for the vendored `duckdb-quack` and `duckdb-ui` sources.
+- [`docs/upstream-quack-patches.md`](./docs/upstream-quack-patches.md) and [`docs/upstream-ui-patches.md`](./docs/upstream-ui-patches.md) — the surgical edits harbor makes to the vendored upstream source trees.
+
+Build from source:
+
+```bash
+git clone --recurse-submodules https://github.com/shreeve/duckdb-harbor.git
+cd duckdb-harbor
+make release
+# → build/release/extension/harbor/harbor.duckdb_extension
+```
+
+Test:
+
+```bash
+make test_release
+scripts/golden-cookie-auth.sh
+scripts/golden-sql-roundtrip.sh
+scripts/golden-sql-types.sh
+```
+
+---
 
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).
 
-This project is a derivative work of `duckdb-quack` and `duckdb-ui`,
-both © Stichting DuckDB Foundation, both MIT-licensed. Files
-substantially derived from those projects retain their original
-upstream MIT headers in addition to harbor's. (When `bundled` UI
-assets land in v0.2, their notices will live in
-`THIRD_PARTY_NOTICES.md`; v0.1 ships proxy mode only and has no
-bundled assets to attribute.)
+This project is a derivative work of [`duckdb-quack`](https://github.com/duckdb/duckdb-quack) and [`duckdb-ui`](https://github.com/duckdb/duckdb-ui), both © Stichting DuckDB Foundation, both MIT-licensed. Files substantially derived from those projects retain their upstream MIT headers in addition to harbor's.

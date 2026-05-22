@@ -29,6 +29,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "duckdb/catalog/default/default_table_functions.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/logging/log_manager.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
@@ -191,6 +192,36 @@ static void LoadInternal(ExtensionLoader &loader) {
 		// Best-effort; harbor_serve will still surface a clear error.
 	}
 
+	// Ensure `~/.duckdb/extension_data/ui/` exists. The DuckDB UI's
+	// JavaScript bundle ATTACHes `<that path>/ui.db AS _duckdb_ui` at
+	// startup for its own state (notebooks, query history, settings).
+	// DuckDB's ATTACH creates the file on first use but does NOT
+	// create missing parent directories, so without this the UI fails
+	// with "Initialization Error: Catalog '_duckdb_ui' does not exist"
+	// on a machine whose `~/.duckdb` was wiped or never populated.
+	//
+	// Walk all three levels because harbor can be loaded via
+	// `LOAD '/abs/path/...'` against a session where DuckDB itself
+	// hasn't yet touched `~/.duckdb` — upstream `duckdb-ui::LoadInternal`
+	// only creates the bottom two levels because its startup path
+	// guarantees `~/.duckdb` already exists.
+	try {
+		auto &fs = FileSystem::GetFileSystem(loader.GetDatabaseInstance());
+		auto ensure_dir = [&](const string &raw_path) {
+			auto path = fs.ExpandPath(raw_path);
+			if (!fs.DirectoryExists(path)) {
+				fs.CreateDirectory(path);
+			}
+		};
+		ensure_dir("~/.duckdb");
+		ensure_dir("~/.duckdb/extension_data");
+		ensure_dir("~/.duckdb/extension_data/ui");
+	} catch (...) {
+		// Best-effort. A read-only home, non-existent home, or sandbox
+		// can deny the create; the UI-init path will surface a
+		// clearer error if that happens.
+	}
+
 	// harbor-specific: SELECT harbor_version() as the smoke-test surface.
 	// Not volatile — the build's version string is deterministic for the
 	// lifetime of the process.
@@ -303,10 +334,26 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Comma-separated allow-list of origins for cross-origin /quack, /auth/*, /sql, /info "
 	                          "(empty = no cross-origin permitted; '*' is rejected)",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::GLOBAL);
-	config.AddExtensionOption("harbor_local_dev_mode",
-	                          "When true AND bind is loopback: skip token requirement for same-Origin /ddb/* and UI catch-all requests "
-	                          "(uses synthetic principal sha256(\"__HARBOR_LOCAL_DEV__\") for connection-pool keying); off by default",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	// `harbor_local_dev_mode` is intentionally rejected on SET. It is
+	// retained as a registered name so stale operator configs surface
+	// loudly via the setter callback rather than silently no-op'ing.
+	// Unauthenticated mode lives on `harbor_serve(uri, token := NULL)`
+	// and applies uniformly to `/sql`, `/quack`, `/ddb/*`, and
+	// `/localEvents`. Both `SET GLOBAL ... = true` and `... = false`
+	// hard-error.
+	config.AddExtensionOption(
+	    "harbor_local_dev_mode",
+	    "Removed. Use harbor_serve(uri, token := NULL) on a loopback bind for unauthenticated mode.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false),
+	    [](ClientContext &, SetScope, Value &) {
+		    throw InvalidInputException(
+		        "harbor_local_dev_mode is no longer supported. To run an unauthenticated harbor on a loopback "
+		        "bind, pass NULL for the token instead:\n"
+		        "    CALL harbor_serve('harbor:127.0.0.1:9494', token := NULL);\n"
+		        "Unlike the previous setting (which only relaxed auth on the UI surface), token := NULL "
+		        "applies uniformly to /sql, /quack, /ddb/*, and /localEvents.");
+	    },
+	    SetScope::GLOBAL);
 
 	// PR-5: /sql endpoint limits per SPEC §6.
 	config.AddExtensionOption("harbor_max_sessions",

@@ -18,6 +18,10 @@ struct HarborLifecycleBindData : public TableFunctionData {
 	bool finished = false;
 	QuackUri listen_uri;
 	string token;
+	// True iff the operator passed `token := NULL` (unauthenticated
+	// mode). Token is empty in that case; HarborHttpServer uses this
+	// flag — not the empty token — to decide auth-bypass behavior.
+	bool unauthenticated = false;
 };
 
 struct HarborWaitBindData : public TableFunctionData {
@@ -61,14 +65,109 @@ unique_ptr<FunctionData> HarborServeBind(ClientContext &context, TableFunctionBi
 	names.emplace_back("listen_url");
 	names.emplace_back("auth_token");
 
-	if (input.named_parameters.find("token") != input.named_parameters.end()) {
-		bind_data->token = input.named_parameters["token"].GetValue<string>();
-	} else {
-		bind_data->token = AuthManager::GenerateRandomToken(*context.db);
+	// Custom-authn + token-arg incompatibility check.
+	//
+	// If a custom `harbor_authentication_function` is configured, the
+	// static `token` argument is dead config: the callback decides
+	// validity, not the static comparison. Silently honoring
+	// `token := 'x'` in that case would mislead operators who expect
+	// to use the returned token as a Bearer credential. Hard-error
+	// here so the contradiction surfaces at config time.
+	//
+	// AuthManager snapshots the same setting at server-start, so what
+	// we see here matches what the running server will use.
+	bool has_custom_authn_fn = false;
+	{
+		auto db_locked = context.db ? context.db : nullptr;
+		if (db_locked) {
+			Value v;
+			auto &cfg = DBConfig::GetConfig(*db_locked);
+			auto pick = [&](const char *key) -> string {
+				if (cfg.TryGetCurrentSetting(key, v) && !v.IsNull() &&
+				    v.type().id() == LogicalTypeId::VARCHAR) {
+					return v.GetValue<string>();
+				}
+				return string();
+			};
+			string fn = pick("harbor_authentication_function");
+			if (fn.empty()) {
+				fn = pick("quack_authentication_function");
+			}
+			has_custom_authn_fn = !fn.empty() && fn != "harbor_check_token" && fn != "quack_check_token";
+		}
 	}
-	// Validate at bind-time: a length error here fails before the listener
-	// thread is spawned, so the SQL caller sees the error clearly.
-	AuthManager::ValidateToken(bind_data->token);
+	if (has_custom_authn_fn && input.named_parameters.find("token") != input.named_parameters.end()) {
+		throw InvalidInputException(
+		    "harbor_serve: token argument is not allowed when a custom "
+		    "harbor_authentication_function is configured. The custom "
+		    "callback decides credential validity; the static token would "
+		    "be dead config.\n"
+		    "  - Either omit the `token` argument:\n"
+		    "        CALL harbor_serve('uri');\n"
+		    "  - Or unset the custom authn function to use static-token auth:\n"
+		    "        RESET GLOBAL harbor_authentication_function;\n"
+		    "        CALL harbor_serve('uri', token := 'your-secret');");
+	}
+
+	// Token semantics on harbor_serve(uri, token := <value>):
+	//
+	//   omitted          → auto-generate a random token (default authn).
+	//   token := 'x'     → use 'x' as the static token (default authn).
+	//   token := NULL    → unauthenticated mode. All auth-bearing
+	//                      routes accept any caller and assign the
+	//                      synthetic 'harbor.local-dev' principal.
+	//                      Refuses to start unless bound to loopback.
+	//   token := ''      → hard error. Empty string is almost always
+	//                      an env-var-plumbing accident; reject loudly.
+	//
+	// DuckDB's named-parameter binder implicitly casts numeric and
+	// boolean values to strings (e.g. `token := 12345` becomes
+	// `token := '12345'`) before this code sees them. The resulting
+	// string is still a deliberate token of the operator's choosing.
+	auto token_iter = input.named_parameters.find("token");
+	if (token_iter == input.named_parameters.end()) {
+		if (has_custom_authn_fn) {
+			// Custom authn + token omitted → DON'T auto-generate. The
+			// callback decides validity; an auto-generated token would
+			// just be returned to the operator and ignored by the
+			// callback. Result row's auth_token column will be NULL.
+			bind_data->token = "";
+			bind_data->unauthenticated = false;
+		} else {
+			// Default authn + token omitted → auto-generate.
+			bind_data->token = AuthManager::GenerateRandomToken(*context.db);
+			bind_data->unauthenticated = false;
+			AuthManager::ValidateToken(bind_data->token);
+		}
+	} else if (token_iter->second.IsNull()) {
+		// token := NULL → unauthenticated mode. Loopback bind required.
+		if (!bind_data->listen_uri.IsLocal()) {
+			throw InvalidInputException(
+			    "harbor_serve: token := NULL (unauthenticated mode) requires a loopback bind, but '%s' is not "
+			    "loopback. Either bind to localhost / 127.0.0.1 / [::1], or pass an explicit token.",
+			    bind_data->listen_uri.Uri());
+		}
+		bind_data->token = "";
+		bind_data->unauthenticated = true;
+	} else {
+		auto token_str = token_iter->second.GetValue<string>();
+		if (token_str.empty()) {
+			throw InvalidInputException(
+			    "harbor_serve: token := '' is not allowed.\n"
+			    "  - To require a static token, pass a non-empty string:\n"
+			    "        token := 'your-secret'\n"
+			    "  - To auto-generate a token, omit the argument:\n"
+			    "        harbor_serve('uri')\n"
+			    "  - To disable authentication (loopback only), pass NULL:\n"
+			    "        token := NULL\n"
+			    "Empty string is rejected because it is a common result of unset "
+			    "environment variables or missing configuration, and would "
+			    "otherwise silently disable authentication.");
+		}
+		bind_data->token = std::move(token_str);
+		bind_data->unauthenticated = false;
+		AuthManager::ValidateToken(bind_data->token);
+	}
 
 	return std::move(bind_data);
 }
@@ -79,11 +178,20 @@ void HarborServe(ClientContext &context, TableFunctionInput &data_p, DataChunk &
 		return;
 	}
 
-	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token);
+	HarborServerState::Global().Start(context, context.db, bind_data.listen_uri, bind_data.token,
+	                                  bind_data.unauthenticated);
 
 	output.SetValue(0, 0, bind_data.listen_uri.Uri());
 	output.SetValue(1, 0, bind_data.listen_uri.Http());
-	output.SetValue(2, 0, bind_data.token);
+	// auth_token is NULL when there is no token the operator should
+	// care about: unauthenticated mode (no auth) or custom-authn mode
+	// (the callback decides, server token is dead config). A
+	// placeholder like '' or '(none)' would be misleading.
+	if (bind_data.token.empty()) {
+		output.SetValue(2, 0, Value(LogicalType::VARCHAR));
+	} else {
+		output.SetValue(2, 0, bind_data.token);
+	}
 	output.SetCardinality(1);
 	bind_data.finished = true;
 }

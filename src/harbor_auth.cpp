@@ -24,11 +24,52 @@
 
 namespace duckdb {
 
-AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p)
-    : db(std::move(db_p)), server_token(std::move(server_token_p)) {
+namespace {
+// Forward declarations for the file-scope helpers below. AuthManager's
+// constructor needs them visible before their definitions further down.
+string GetSettingString(DatabaseInstance &db, const string &setting_name);
+bool IsBuiltinNopAuthz(const string &fn_name);
+} // namespace
+
+AuthManager::AuthManager(weak_ptr<DatabaseInstance> db_p, string server_token_p, bool unauthenticated_p)
+    : db(std::move(db_p)), server_token(std::move(server_token_p)), unauthenticated(unauthenticated_p) {
+	// Snapshot the authn/authz function names at construction so per-
+	// request code does not re-read them. Locks the auth posture for
+	// the running server's lifetime; mid-process SET GLOBAL on these
+	// settings does not affect the running server. Restart to apply.
+	if (auto db_locked = db.lock()) {
+		auto resolve = [&](const char *primary, const char *quack_alias, const char *default_name) -> string {
+			auto v = GetSettingString(*db_locked, primary);
+			if (v.empty()) {
+				v = GetSettingString(*db_locked, quack_alias);
+			}
+			if (v.empty()) {
+				v = default_name;
+			}
+			return v;
+		};
+		snapshot_authn_fn_name =
+		    resolve("harbor_authentication_function", "quack_authentication_function", "harbor_check_token");
+		snapshot_authz_fn_name =
+		    resolve("harbor_authorization_function", "quack_authorization_function", "harbor_nop_authorization");
+		snapshot_has_custom_authn_fn = snapshot_authn_fn_name != "harbor_check_token" &&
+		                                snapshot_authn_fn_name != "quack_check_token";
+		// Aliases under a custom name are treated as operator policy;
+		// built-in nops (any case / schema-prefix variant) count as
+		// default. Same normalization IsBuiltinNopAuthz uses.
+		snapshot_has_custom_authz_fn = !IsBuiltinNopAuthz(snapshot_authz_fn_name);
+	}
 }
 
 AuthManager::~AuthManager() {
+}
+
+const string &AuthManager::LocalDevPrincipalId() {
+	// Literal string (not a hash). Human-readable in audit logs;
+	// stable across processes; no colon delimiter collision with
+	// the __HARBOR_ADMIN__:resource:action format used elsewhere.
+	static const string id = "harbor.local-dev";
+	return id;
 }
 
 void AuthManager::ValidateToken(const string &token) {
@@ -213,17 +254,21 @@ string AuthManager::GenerateRandomToken(DatabaseInstance &db) {
 }
 
 bool AuthManager::RunAuthentication(const string &session_id, const string &client_token) {
+	// In unauthenticated mode the credential comparison is skipped
+	// entirely; Quack's CONNECTION_REQUEST frame is still parsed by
+	// the caller, only the comparison short-circuits. Stock Quack
+	// clients sending a non-empty AuthString continue to connect.
+	if (unauthenticated) {
+		return true;
+	}
 	auto db_locked = db.lock();
 	if (!db_locked) {
 		return false;
 	}
-	auto fn_name = GetSettingString(*db_locked, "harbor_authentication_function");
-	if (fn_name.empty()) {
-		fn_name = GetSettingString(*db_locked, "quack_authentication_function");
-	}
-	if (fn_name.empty()) {
-		fn_name = "harbor_check_token";
-	}
+	// Use the snapshot resolved at server start, never a live setting
+	// read — that would let an authenticated caller redirect auth
+	// mid-process via SET GLOBAL.
+	const auto &fn_name = snapshot_authn_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(client_token), Value(server_token)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);
@@ -272,8 +317,11 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 	// Round-20 polish: only pay the two-setting-read cost when the
 	// query is actually __HARBOR_ADMIN__-prefixed. Non-admin /sql and
 	// /quack queries hit the fast resolve-fn path below directly.
-	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") &&
-	    !AuthManager::IsAdminAuthzCustomConfigured(*db_locked)) {
+	// Use the snapshotted "is custom authz configured?" flag — never
+	// a live setting read. Same rationale as RunAuthentication: an
+	// authenticated caller must not be able to SET GLOBAL the authz
+	// function mid-process and unlock admin endpoints for everyone.
+	if (StringUtil::StartsWith(query, "__HARBOR_ADMIN__:") && !snapshot_has_custom_authz_fn) {
 		bool allow_admin_without_authz = false;
 		Value allow_setting;
 		auto &config = DBConfig::GetConfig(*db_locked);
@@ -288,14 +336,9 @@ bool AuthManager::RunAuthorization(const string &session_id, const string &query
 		// returns true. This is the explicit operator opt-in path.
 	}
 
-	// Resolve the authz function name in Harbor-primary / Quack-compat order.
-	auto fn_name = GetSettingString(*db_locked, "harbor_authorization_function");
-	if (fn_name.empty()) {
-		fn_name = GetSettingString(*db_locked, "quack_authorization_function");
-	}
-	if (fn_name.empty()) {
-		fn_name = "harbor_nop_authorization";
-	}
+	// Use the snapshot resolved at server start; authz is immutable
+	// for the running server's lifetime.
+	const auto &fn_name = snapshot_authz_fn_name;
 	auto sql = StringUtil::Format("SELECT %s(?, ?)", fn_name);
 	vector<Value> bind_values = {Value(session_id), Value(query)};
 	return EvaluateAuthQuery(*db_locked, sql, bind_values);
@@ -415,6 +458,19 @@ AuthResult AuthManager::VerifyCookie(const string &cookie_value) {
 
 AuthResult AuthManager::AuthenticateRequest(const duckdb_httplib_openssl::Request &req,
                                             const string &synthetic_session_id) {
+	// In unauthenticated mode, short-circuit before inspecting any
+	// presented credentials. Bearer / Cookie / X-Harbor-Token are
+	// ignored unconditionally — a stale cookie must never produce a
+	// different principal than a fresh request, or audit-trail
+	// meaning is lost.
+	if (unauthenticated) {
+		AuthResult ar;
+		ar.ok = true;
+		ar.principal_id = LocalDevPrincipalId();
+		ar.source = AuthSource::kLocalDev;
+		return ar;
+	}
+
 	auto try_explicit_token = [&](const string &header_name, AuthSource source,
 	                              const string &raw_value) -> AuthResult {
 		AuthResult ar;

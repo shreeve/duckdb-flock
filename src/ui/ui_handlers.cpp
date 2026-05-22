@@ -157,33 +157,18 @@ bool UiHandlers::IsBoundLocally() const {
 }
 
 bool UiHandlers::LocalDevMode() const {
-	auto db = ddb_instance.lock();
-	if (!db) {
-		return false;
-	}
-	Value setting_val;
-	auto &config = DBConfig::GetConfig(*db);
-	if (!config.TryGetCurrentSetting("harbor_local_dev_mode", setting_val) || setting_val.IsNull()) {
-		return false;
-	}
-	try {
-		return setting_val.GetValue<bool>();
-	} catch (...) {
-		return false;
-	}
+	// Snapshotted at server start (via `harbor_serve(..., token := NULL)`),
+	// not read from a SQL setting — avoids mid-process mutation races
+	// and keeps the auth posture immutable for the running server's
+	// lifetime.
+	return server.IsUnauthenticated();
 }
 
 namespace {
 
-// Synthetic principal id used when harbor_local_dev_mode bypasses
-// real authentication. Derived as sha256("__HARBOR_LOCAL_DEV__") so
-// it has the same shape (64 lowercase hex chars) as a real
-// principal_id and the connection-pool keying logic doesn't need
-// to special-case it.
-const std::string &LocalDevPrincipalId() {
-	static const std::string id = duckdb::harbor_crypto::Sha256Hex("__HARBOR_LOCAL_DEV__");
-	return id;
-}
+// The synthetic principal for unauthenticated mode lives on
+// AuthManager (`AuthManager::LocalDevPrincipalId()`) so /sql, /quack,
+// admin, and UI all reach the same constant.
 
 // Minimal harbor login page. Inline HTML+CSS+JS so we don't need a
 // separate asset pipeline. The page POSTs the user-pasted token to
@@ -358,30 +343,18 @@ std::string UiHandlers::ScopedConnectionKey(const std::string &principal_id, con
 }
 
 AuthResult UiHandlers::AuthorizeUiRequest(const httplib::Request &req, bool require_origin_allowed) {
-	// Try the standard cookie/bearer/X-Harbor-Token path. We pass a
-	// synthetic session id ("__HARBOR_AUTH__:ddb") so per-request
-	// authz hooks can pattern-match on it if needed; AuthManager
-	// only uses it for prepared-statement parameter binding.
-	auto result = auth.AuthenticateRequest(req, "__HARBOR_AUTH__:ddb");
-	if (result.ok) {
-		return result;
-	}
-	// Local-dev escape — only when ALL of:
-	//   - harbor_local_dev_mode = true
-	//   - bind host is loopback
-	//   - (if require_origin_allowed) the request's Origin is in
-	//     our allowed-origins set
-	if (!LocalDevMode() || !IsBoundLocally()) {
-		return result;
-	}
-	if (require_origin_allowed && !IsAllowedOrigin(req.get_header_value("Origin"))) {
-		return result;
-	}
-	AuthResult bypass;
-	bypass.ok = true;
-	bypass.principal_id = LocalDevPrincipalId();
-	bypass.source = AuthSource::kLocalDev;
-	return bypass;
+	// Delegates to AuthManager. When the server was started with
+	// `harbor_serve(uri, token := NULL)` on a loopback bind,
+	// AuthenticateRequest short-circuits to the synthetic principal
+	// before this function sees the request, so /sql, /quack,
+	// /ddb/*, and admin all honor unauthenticated mode uniformly.
+	//
+	// `require_origin_allowed` is preserved as a parameter for future
+	// use; Origin checks for browser-CSRF live in the route handlers
+	// (HandleRun, HandleTokenize, HandleInterrupt, the /localEvents
+	// route lambda).
+	(void)require_origin_allowed;
+	return auth.AuthenticateRequest(req, "__HARBOR_AUTH__:ddb");
 }
 
 shared_ptr<DatabaseInstance> UiHandlers::LockDatabaseInstance() {

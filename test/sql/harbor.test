@@ -151,10 +151,19 @@ SELECT current_setting('harbor_cors_origins')
 ----
 (empty)
 
-query I
-SELECT current_setting('harbor_local_dev_mode')
+# harbor_local_dev_mode is rejected on SET. Reading the setting still
+# returns the registered default (DuckDB doesn't expose a getter
+# callback hook), but any attempt to SET it hard-errors with a clear
+# pointer at the replacement: `harbor_serve(..., token := NULL)`.
+statement error
+SET GLOBAL harbor_local_dev_mode = true
 ----
-false
+no longer supported
+
+statement error
+SET GLOBAL harbor_local_dev_mode = false
+----
+no longer supported
 
 # harbor_cookie_signing_key is intentionally NOT a setting (security
 # review — would let any SQL caller mint cookies). Confirm it's
@@ -287,3 +296,66 @@ query I
 SELECT current_setting('harbor_query_timeout_s')
 ----
 0
+
+# ------------------------------------------------------------------
+# harbor_serve token semantics
+# ------------------------------------------------------------------
+# Four meaningful forms of the `token` argument:
+#   - omitted          → auto-generate (default authn)
+#   - token := 'x'     → static token (default authn)
+#   - token := NULL    → unauthenticated mode, loopback bind required
+#   - token := ''      → hard error (helpful migration message)
+# Plus the loopback enforcement on the NULL case.
+
+# token := NULL on a loopback bind: succeeds, auth_token column is NULL.
+query III con1
+CALL harbor_serve('quack:127.0.0.1:19495', token := NULL)
+----
+quack:127.0.0.1:19495	http://127.0.0.1:19495	NULL
+
+statement ok con1
+CALL harbor_stop()
+
+# token := NULL on a non-loopback bind: refuses to start. We bypass
+# the unrelated `allow_other_hostname` localhost-only default to
+# isolate the NULL-loopback check (otherwise we'd just see the
+# pre-existing "Only localhost is allowed..." error).
+statement error con1
+CALL harbor_serve('quack:0.0.0.0:19495', token := NULL, allow_other_hostname := true)
+----
+requires a loopback bind
+
+# token := '' (empty string): hard error with the migration-teaching
+# message. This is the load-bearing error of the design — it's the
+# one place where an env-var-plumbing accident lands.
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := '')
+----
+token := '' is not allowed
+
+# Custom harbor_authentication_function + ANY token argument is a
+# hard error. The custom callback decides validity; a static token
+# would be dead config that misleads operators (they'd copy the
+# returned token into a Bearer header and wonder why auth fails).
+statement ok
+SET GLOBAL harbor_authentication_function = 'quack_check_token'
+
+# quack_check_token is the upstream alias for the default. Custom-authn
+# detection treats it as default (not custom). Sanity-check by setting
+# a non-default name and trying to pass a token.
+statement ok
+SET GLOBAL harbor_authentication_function = 'my_custom_auth_fn'
+
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := 'should-be-rejected')
+----
+custom harbor_authentication_function
+
+statement error con1
+CALL harbor_serve('quack:localhost:19495', token := NULL)
+----
+custom harbor_authentication_function
+
+# Reset for any later tests in the file.
+statement ok
+RESET GLOBAL harbor_authentication_function

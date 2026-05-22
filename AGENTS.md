@@ -24,7 +24,7 @@ Plus auth routes (`/auth/login`, `/auth/logout`) and convenience routes
 For the public-facing "why does this exist when those three already
 exist" framing — useful when explaining harbor to evaluators or
 grounding yourself before reading SPEC.md — see
-[`docs/WHY_HARBOR.md`](./docs/WHY_HARBOR.md).
+the "Why harbor?" section of [`README.md`](./README.md).
 
 ## Implementation roadmap
 
@@ -639,7 +639,7 @@ expect every path where it is.
 Two upstream-source directories sit side-by-side at the top, doing
 different jobs (this trips up first-time readers):
 
-- **`duckdb/`** — git submodule pinned to v1.5.2. **Build-required:**
+- **`duckdb/`** — git submodule pinned to v1.5.3. **Build-required:**
   `CMakeLists.txt` references `duckdb/third_party/httplib` and
   `duckdb/extension/autocomplete/include`. The build literally won't
   work without it. Never edit.
@@ -654,10 +654,9 @@ Top-level files + tracked dirs:
 | `SPEC.md` | Authoritative design | Carefully — major changes need consensus |
 | `README.md` | User-facing introduction | Yes |
 | `AGENTS.md` | This file | Yes |
-| `CHANGELOG.md` | Released-version log | Yes (append on release) |
 | `LICENSE` | MIT, dual copyright (DuckDB Foundation + harbor authors) | Never silently |
 | `CMakeLists.txt`, `Makefile`, `vcpkg.json`, `extension_config.cmake`, `.editorconfig` | Build configuration | Carefully |
-| `duckdb/` | Submodule, pinned at v1.5.2 (build-required) | Never |
+| `duckdb/` | Submodule, pinned at v1.5.3 (build-required) | Never |
 | `extension-ci-tools/` | Submodule (provides Makefiles + Actions matrix) | Never |
 | `docs/upstream-quack-patches.md`, `docs/upstream-ui-patches.md` | Tracks every edit harbor made to vendored upstream code so future rebases are diffable | Yes (append when rebasing) |
 
@@ -1007,7 +1006,8 @@ Also:
   for registration + default value.
 - If you touched the wire format intentionally, document the change
   in `docs/upstream-quack-patches.md` or `docs/upstream-ui-patches.md`
-  (whichever applies) and append a `CHANGELOG.md` entry.
+  (whichever applies). Release notes live on the GitHub Releases
+  page; there is no in-repo `CHANGELOG.md`.
 
 ## When in doubt
 

@@ -30,7 +30,7 @@ pattern.
 
 | File | Why |
 |---|---|
-| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with harbor's `DUCKDB_CPP_EXTENSION_ENTRY(harbor, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. |
+| `src/ui/ui_extension.cpp` | Has its own `DUCKDB_CPP_EXTENSION_ENTRY(ui, ...)` C entry symbol that would conflict with harbor's `DUCKDB_CPP_EXTENSION_ENTRY(harbor, ...)`. The pieces of `LoadInternal` we need (UI extension settings registration, `"ui"` StorageExtension registration via `UIStorageExtensionInfo`, and the `~/.duckdb/extension_data/ui/` directory creation that the bundle's `_duckdb_ui` ATTACH depends on) were absorbed into `src/quack/quack_extension.cpp::LoadInternal`. Harbor's directory-creation walk includes `~/.duckdb` itself (upstream creates only the bottom two levels) because harbor can be loaded via `LOAD '/abs/path/...'` against a session where DuckDB hasn't yet populated the home extension dir. |
 
 ## Other vendored files — NO edits
 

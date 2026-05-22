@@ -53,8 +53,6 @@ on:
       - 'docs/**'
       - 'scripts/**'        # golden-*.sh, validate-deployment.sh, load-test.sh — CI doesn't run them
       - 'examples/**'       # auth recipes (operator-loaded SQL)
-      - 'deploy/**'         # Dockerfile, systemd unit, bootstrap SQL
-      - 'CHANGELOG.md'
       - '.editorconfig'
       - '.gitignore'
       - '.gitattributes'
@@ -66,8 +64,6 @@ on:
       - 'docs/**'
       - 'scripts/**'
       - 'examples/**'
-      - 'deploy/**'
-      - 'CHANGELOG.md'
       - '.editorconfig'
       - '.gitignore'
       - '.gitattributes'
@@ -84,7 +80,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5.2
+      duckdb_version: v1.5.3
       ci_tools_version: v1.5-variegata
       extension_name: harbor
       reduced_ci_mode: 'disabled'
